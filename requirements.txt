@@ -6,3 +6,6 @@ feedparser>=6.0
 python-dateutil>=2.9
 pydantic>=2.7
 rich>=13.7
+google-api-python-client>=2.100
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.2

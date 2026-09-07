@@ -200,6 +200,48 @@ class Profile:
     def visa_note(self) -> str:
         return " ".join((self.preferences.get("visa_note") or "").split())
 
+    def geography_rule(self) -> str:
+        """Built from the actual configured onsite cities/countries, not a
+        hardcoded city name — see repo audit 2026-09-07 finding #4: the LLM
+        prompt used to hardcode "Hyderabad only" independently of
+        `preferences.onsite_cities`, so editing profile.yaml silently stopped
+        matching what the LLM was actually told."""
+        cities = [c for group in self.onsite_cities for c in group]
+        city_text = ", ".join(cities) if cities else "no onsite/hybrid city configured"
+        abroad_text = (
+            f"; onsite/hybrid is also in scope in: {', '.join(self.onsite_countries)}"
+            if self.onsite_countries else ""
+        )
+        home = ", ".join(self.locations) if self.locations else "the candidate's home country"
+        remote_scope = home.title()
+        return (
+            f"Geography (strict): REMOTE roles only if the employer accepts "
+            f"applicants based in {remote_scope} — a role advertised as remote "
+            f"but tied to a single other country does NOT count. ONSITE/HYBRID "
+            f"only in: {city_text}{abroad_text}. Any other on-site location is "
+            f"out of scope."
+        )
+
+    def role_scope_rule(self) -> str:
+        """Built from `preferences.qa_roles_only` — see repo audit 2026-09-07
+        finding #4: the LLM prompt used to hardcode 'ONLY QA ROLES'
+        unconditionally, ignoring the documented `qa_roles_only: false`
+        option (config.yaml)."""
+        if self.qa_roles_only:
+            return (
+                "Role scope (strict): ONLY QA/testing/quality/automation/"
+                "evaluation roles are in scope. A software developer role is "
+                "NOT in scope even when its description mentions testing "
+                "heavily."
+            )
+        return (
+            "Role scope: QA/testing/automation/evaluation roles are the "
+            "primary target, but relevant software engineering roles with "
+            "real testing, quality-engineering, or AI/LLM evaluation "
+            "responsibility are also in scope — score them on their actual "
+            "responsibilities, not their title alone."
+        )
+
     def llm_block(self) -> str:
         """Compact candidate description handed to the scoring model."""
         exp = self.experience
@@ -215,11 +257,8 @@ class Profile:
             f"Experience: ~{exp.get('years','?')} years "
             f"(level: {self.self_level.replace('_',' ')})",
             pay,
-            "Geography (strict): REMOTE roles only if the employer accepts "
-            "applicants based in India — a role advertised as remote but tied "
-            "to the US, Canada, Brazil or any other single country does NOT "
-            "count. ONSITE/HYBRID only in Hyderabad, India. Not Bengaluru, not "
-            "any other city, never outside India.",
+            self.geography_rule(),
+            self.role_scope_rule(),
         ]
         if self.visa_note:
             block.append(f"Work authorisation: {self.visa_note}")

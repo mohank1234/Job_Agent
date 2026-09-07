@@ -87,24 +87,43 @@ class Job:
     # ------------------------------------------------------------- identity
     @property
     def fingerprint(self) -> str:
-        """Stable ID across sources — the same job on RemoteOK and the
-        company's own Greenhouse board collapses to one entry."""
-        key = f"{normalize(self.company)}|{normalize(self.title)}"
+        """Stable ID per distinct posting.
+
+        Company+title alone collapses genuinely distinct vacancies at the
+        same company (two different requisitions with the same title) into
+        one row — reproduced in the 2026-09-07 repo audit (finding #2). The
+        URL is the best available disambiguator (unique per requisition on a
+        given board), so it is included whenever present. Only when a job
+        has no URL at all (e.g. a manually constructed Job for `tailor`) does
+        this fall back to company+title+location, which is still weaker than
+        company+title alone as it was before.
+        """
+        disambiguator = normalize(self.url) or normalize(self.location)
+        key = f"{normalize(self.company)}|{normalize(self.title)}|{disambiguator}"
         return hashlib.sha256(key.encode()).hexdigest()[:16]
 
-    @property
-    def content_hash(self) -> str:
-        """Changes when the posting — or how we classify it — materially
-        changes, so an unchanged job reuses its cached score instead of costing
-        another LLM call.
+    def content_hash(self, policy_version: str = "") -> str:
+        """Changes when the posting, how we classify it, or the matching
+        POLICY changes, so a stale verdict is never silently reused.
 
         The classification is part of the hash because it is part of what the
         scorer sees (llm_blob names the role family, tier and seniority). A
         reclassification must therefore invalidate the cached verdict.
+
+        `policy_version` must fold in everything else that can change the
+        verdict for unchanged job text: the profile content, the matcher's
+        SYSTEM prompt, and the configured model. Before this was added
+        (2026-09-07 repo audit, finding #3), editing profile.yaml, the prompt,
+        or the model left every cached verdict untouched and reused even
+        though the LLM would score differently under the new inputs. Callers
+        that don't care about policy staleness (e.g. a quick fingerprint-only
+        dedup check) may omit it, but anything gating a cached LLM verdict
+        must pass the current `matcher.policy_version(profile, llm_cfg)`.
         """
         body = (
             f"{self.title}|{self.location}|{self.workplace}|"
             f"{self.role_family}|{self.role_tier}|{self.seniority}|"
+            f"{policy_version}|"
             f"{self.description[:4000]}"
         )
         return hashlib.sha256(body.encode()).hexdigest()[:16]

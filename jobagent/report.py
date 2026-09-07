@@ -90,9 +90,18 @@ def build_markdown(
             ))
         if stats.get("model"):
             via = stats.get("provider")
+            # "(free)" used to be asserted unconditionally, derived only from
+            # the provider NAME being on config.yaml's trusted allow-list —
+            # no token count or billing response is ever read anywhere in
+            # llm.py/matcher.py/report.py (repo audit 2026-09-07 finding
+            # #16). This is honest about what's actually known: the provider
+            # is configured as free-tier, not that usage was measured as
+            # zero cost.
             rows.append((
                 "Model",
-                f"`{stats['model']}`" + (f" via {via} (free)" if via else " (free)"),
+                f"`{stats['model']}`"
+                + (f" via {via} (configured as free-tier)" if via
+                   else " (configured as free-tier)"),
             ))
 
         lines += ["| | |", "|---|---|"]

@@ -1,16 +1,28 @@
-# Personal / PII - never commit. Your real career profile, resume, generated
-# per-job application kits, and researched third-party contact info.
+# Personal / PII - never commit. Your real career profile, resume content,
+# generated per-job application kits, and researched third-party contact info.
+# resume/tailor.py and resume/build_resume.py ARE tracked - they're generic
+# rendering logic with no personal data (repo audit 2026-09-07 finding #12:
+# gitignoring the whole resume/ directory also gitignored that code, so
+# apply-kit couldn't even be imported on a fresh checkout).
 profile.yaml
-resume/
+resume/resume_data.py
+resume/*.docx
+resume/*.md
 applications/
 outreach_targets.yaml
 
-# Local runtime config - contains your real mailbox address (config.yaml.example
-# would be the place for a redacted template if one gets added later).
+# Local runtime config - contains your real mailbox address. config.yaml.example
+# is the tracked, sanitized template - copy it to config.yaml and edit.
 config.yaml
+
+# Gmail OAuth - client secret and the token minted after the first sign-in.
+# Never commit either; both grant access to a real Gmail account.
+credentials.json
+token.json
 
 # Generated / derived data - large, regenerable, not meant for version control.
 jobs.db
+jobs.db.bak-*
 digest_*.md
 logs/
 

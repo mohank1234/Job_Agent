@@ -82,17 +82,15 @@ If a required skill is absent from the profile, it belongs in missing_skills.
 7. Do not inflate a score because many keywords appear. Score realistic \
 suitability.
 
-8. WORK LOCATION — absolute, no exceptions. The candidate is in Hyderabad, \
-India and will not relocate.
-   REMOTE counts ONLY if someone based in India can actually take the job. \
-Most postings marked "remote" are remote within ONE country. If the posting \
-says "Remote - US", "Canada", "Brazil - Remote", "San Francisco", or requires \
-work authorisation elsewhere, it is NOT applicable: score below 40, LOW \
-priority, and say so in `gap`.
-   ONSITE or HYBRID counts ONLY in Hyderabad. Not Bengaluru, not Pune, not any \
-other Indian city, never outside India. Anything else scores below 40.
-   A role genuinely open worldwide, or explicitly open to India or APAC, is in \
-scope and scores on its merits.
+8. WORK LOCATION — absolute, no exceptions. Apply the "Geography (strict)" \
+rule stated in the CANDIDATE PROFILE below EXACTLY as written there — it is \
+generated from the candidate's actual configured location preferences, not a \
+fixed rule. Do not substitute a different city, country, or default: if the \
+profile names specific onsite cities, only those count for ONSITE/HYBRID; if \
+a posting's location requirement conflicts with what the profile states, \
+score below 40, LOW priority, and say so in `gap`. A role genuinely open \
+worldwide, or explicitly open to the profile's stated home country or region, \
+is in scope and scores on its merits.
 
 9. COMPENSATION. The candidate will not move below the stated minimum. When a \
 posting states pay clearly below that minimum, say so in `gap` and reduce the \
@@ -100,17 +98,35 @@ priority — but most postings state nothing, so never assume.
 
 10. EMPLOYER QUALITY. Prefer product companies that pay well in India (Atlassian, Postman, BrowserStack, Databricks, Snowflake, Stripe, Okta, Atlassian, Razorpay, PhonePe, Paytm, Swiggy, Flipkart, Adobe, Salesforce, ServiceNow, NVIDIA, Microsoft, Google, Glean, Rubrik and similar). Score DOWN a posting from a staffing, recruitment or manpower consultancy that is hiring for an undisclosed client: the employer is unknown, the pay band is usually lower and the process is opaque. Say so in `gap` when it applies.
 
-11. ONLY QA ROLES. The role itself must be testing, quality assurance, test \
-automation, SDET, or AI/model evaluation. A software developer role is NOT in \
-scope even when its description mentions testing heavily — "Software Engineer, \
-Generative AI", "Senior Software Engineer, Agents" and "Full Stack Engineer" \
-all score below 40.
+11. ROLE SCOPE. Apply the "Role scope" rule stated in the CANDIDATE PROFILE \
+below exactly as written there — whether non-QA-titled engineering roles are \
+in scope at all depends on the candidate's configured preference, not a fixed \
+default. When QA-only scope applies, a software developer role is NOT in \
+scope even when its description mentions testing heavily — "Software \
+Engineer, Generative AI", "Senior Software Engineer, Agents" and "Full Stack \
+Engineer" all score below 40 in that mode.
 
 Fields: `why` = short concrete phrases explaining the match. \
 `matching_skills` = candidate skills the posting actually asks for. \
 `missing_skills` = required skills the candidate does not have. \
 `gap` = one short sentence on the experience/seniority gap, or "none". \
 `recommendation` = one short sentence on whether and how to apply."""
+
+_SYSTEM_VERSION = "2026-09-08a"  # bump whenever SYSTEM's wording changes materially
+
+
+def policy_version(profile: Profile, llm_cfg: dict) -> str:
+    """Fingerprint of everything besides the job text that can change what
+    verdict a posting gets: the full profile content, the SYSTEM prompt, and
+    the configured model. Feed this into `Job.content_hash()` wherever a
+    cached LLM verdict is being reused — see repo audit 2026-09-07 finding #3:
+    without this, editing profile.yaml, this module's SYSTEM prompt, or the
+    configured model left every cached verdict stale but still reused."""
+    import hashlib
+    import json
+    raw = json.dumps(profile.raw, sort_keys=True, default=str)
+    body = f"{_SYSTEM_VERSION}|{raw}|{llm_cfg.get('model','')}|{llm_cfg.get('provider','')}"
+    return hashlib.sha256(body.encode()).hexdigest()[:12]
 
 
 class JobMatch(BaseModel):
@@ -259,11 +275,12 @@ def score_candidates(
     llm_weight = float(llm_cfg.get("llm_weight", 0.75))
     errors: list[str] = []
     counts = {"cached": 0, "llm": 0, "fallback": 0}
+    pv = policy_version(profile, llm_cfg)
 
     # Cache pass first — an unchanged posting never costs another call.
     pending: list[Job] = []
     for job in jobs:
-        if store is not None and store.apply_cached(job):
+        if store is not None and store.apply_cached(job, pv):
             counts["cached"] += 1
         else:
             pending.append(job)

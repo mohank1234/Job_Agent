@@ -36,7 +36,7 @@ from rich.console import Console
 from rich.table import Table
 
 from jobagent.llm import list_openrouter_models
-from jobagent.matcher import (rule_match, rule_match_all,
+from jobagent.matcher import (policy_version, rule_match, rule_match_all,
                               score_candidates, tailor)
 from jobagent.models import Job
 from jobagent.profile import load_profile
@@ -96,10 +96,12 @@ def collect(config: dict) -> tuple[list[Job], list[str], dict]:
     if sources.get("ats", True):
         boards = load_yaml("companies.yaml")
         with console.status("Fetching company ATS boards..."):
-            ats_jobs = fetch_ats(boards)
+            ats_jobs, ats_errors = fetch_ats(boards)
         counts["ats"] = len(ats_jobs)
-        console.print(f"  ATS boards       : {len(ats_jobs)} postings")
+        console.print(f"  ATS boards       : {len(ats_jobs)} postings"
+                       + (f" ({len(ats_errors)} boards failed)" if ats_errors else ""))
         jobs += ats_jobs
+        notes += ats_errors
 
     with console.status("Fetching aggregator feeds..."):
         feed_jobs, feed_errors = fetch_feeds(sources)
@@ -152,16 +154,17 @@ def cmd_fetch(args) -> None:
     rule_match_all(jobs, profile)        # every job leaves here with a score
 
     store = Store(ROOT / "jobs.db")
+    pv = policy_version(profile, llm_cfg)
 
     # Drop anything already judged irrelevant and unchanged since. Pruned rows
     # are gone from `seen`, so the score cache cannot help them — without this
     # check every rejected posting would be re-stored and re-scored by the LLM
-    # on every run. The tombstone hash includes the classification, so a job
-    # DOES come back for reconsideration if the classifier or the posting
-    # changes.
+    # on every run. The tombstone hash includes the classification AND the
+    # matching policy, so a job DOES come back for reconsideration if the
+    # classifier, the posting, or the profile/prompt/model changes.
     tombstones = store.dismissed_hashes()
     if tombstones:
-        kept = [j for j in jobs if tombstones.get(j.fingerprint) != j.content_hash]
+        kept = [j for j in jobs if tombstones.get(j.fingerprint) != j.content_hash(pv)]
         skipped = len(jobs) - len(kept)
         if skipped:
             console.print(
@@ -192,7 +195,7 @@ def cmd_fetch(args) -> None:
     console.print(f"  [bold]{len(cands)} candidates[/bold] for detailed matching\n")
 
     console.print("[bold]3. Storing[/bold]")
-    new_count, known = store.upsert_all(jobs)
+    new_count, known = store.upsert_all(jobs, policy_version=pv)
     console.print(f"  Stored           : {len(jobs)} ({new_count} new, {known} updated)\n")
 
     # A job first seen in this run has first_seen == last_seen.
@@ -503,8 +506,22 @@ def cmd_apply_kit(args) -> None:
 
 
 def cmd_check_setup(_args) -> None:
-    """Tell me exactly what is connected and what is still missing."""
+    """Tell me exactly what is connected and what is still missing.
+
+    Every row below is backed by a real, minimal live request — no row is
+    ever marked "connected" purely because config/env-var fields are
+    present. Before this fix (repo audit 2026-09-07 finding #10), a revoked
+    mailbox app password still showed "connected" here because the function
+    never actually logged in; the separate `mailbox-test` command was the
+    only thing that ever really checked. That gap is closed: this command
+    now performs the same class of check `mailbox-test`/`verify` do, just
+    scoped small enough to stay fast.
+    """
+    import httpx
     import os
+
+    from jobagent.sources.mailbox import test_connection as _mailbox_test_connection
+
     config = load_yaml("config.yaml")
     sources = config.get("sources") or {}
     t = Table(show_header=True, header_style="bold")
@@ -515,48 +532,163 @@ def cmd_check_setup(_args) -> None:
                   "[green]connected[/green]" if ok else "[yellow]not connected[/yellow]",
                   detail)
 
+    # --- ATS boards: real live requests against a small sample, not just a
+    # count of configured slugs. Sampling (not all ~175 boards) keeps this
+    # command fast enough to run before every session, the way `verify` (the
+    # full check) is meant to run only after editing companies.yaml.
     boards = load_yaml("companies.yaml")
     n_boards = sum(len(v or []) for v in boards.values())
-    row("Company ATS boards", n_boards > 0, f"{n_boards} boards configured")
-    for key in ("remoteok", "arbeitnow", "remotive", "jobicy", "himalayas",
-                "weworkremotely"):
-        row(f"Feed: {key}", bool(sources.get(key)), "public, no key needed")
-
-    # --- Adzuna ---
-    adz = sources.get("adzuna") or {}
-    has_keys = bool(adz.get("app_id")) and bool(adz.get("app_key"))
-    if adz.get("enabled") and has_keys:
-        row("Adzuna (India + 6 more)", True,
-            f"{len(adz.get('search_terms') or [])} role terms x "
-            f"{len(adz.get('countries') or [])} countries")
-    elif has_keys:
-        row("Adzuna (India + 6 more)", False,
-            "keys present — set sources.adzuna.enabled: true")
+    sample = {vendor: (slugs or [])[:2] for vendor, slugs in boards.items()}
+    sample = {v: s for v, s in sample.items() if s}
+    if sample:
+        results = verify_boards(sample)
+        live = sum(1 for _v, _s, count, err in results if err is None)
+        row("Company ATS boards", live > 0,
+            f"{n_boards} configured · sample check {live}/{len(results)} boards live")
     else:
+        row("Company ATS boards", False, "no boards configured in companies.yaml")
+
+    # --- Aggregator feeds: one real HTTP GET per public feed, not a config
+    # presence check. A feed that changed its API or is down now shows up
+    # here instead of only failing silently mid-fetch.
+    FEED_HEALTH_URLS = {
+        "remoteok": "https://remoteok.com/api",
+        "arbeitnow": "https://www.arbeitnow.com/api/job-board-api",
+        "remotive": "https://remotive.com/api/remote-jobs?limit=1",
+        "jobicy": "https://jobicy.com/api/v2/remote-jobs?count=1",
+        "himalayas": "https://himalayas.app/jobs/api",
+        "weworkremotely": "https://weworkremotely.com/remote-jobs.rss",
+    }
+    with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+        for key, url in FEED_HEALTH_URLS.items():
+            if not sources.get(key):
+                row(f"Feed: {key}", False, "disabled in config.yaml")
+                continue
+            try:
+                resp = client.get(url, headers={"User-Agent": "job-agent/1.0"})
+                ok = resp.status_code < 400
+                row(f"Feed: {key}", ok,
+                    "reachable" if ok else f"HTTP {resp.status_code}")
+            except httpx.HTTPError as exc:
+                row(f"Feed: {key}", False, f"{type(exc).__name__}: {exc}")
+
+    # --- Adzuna: a real minimal API call (1 result) when keys are present,
+    # not just a check that the fields are non-empty — a typo'd or revoked
+    # key used to show the same "not connected, add keys" message as never
+    # having configured it at all.
+    adz = sources.get("adzuna") or {}
+    app_id, app_key = adz.get("app_id"), adz.get("app_key")
+    if not (app_id and app_key):
         row("Adzuna (India + 6 more)", False,
             "get a free key at developer.adzuna.com, paste app_id + app_key")
-
-    # --- Mailbox ---
-    mail = sources.get("mailbox") or {}
-    pw_var = mail.get("password_env", "JOBAGENT_MAIL_PASSWORD")
-    has_pw = bool(os.environ.get(pw_var))
-    has_user = bool(mail.get("user"))
-    if mail.get("enabled") and has_pw and has_user:
-        row("Job-alert email (Naukri/LinkedIn)", True,
-            f"{mail.get('user')} · folder {mail.get('folder')} · read-only")
     else:
+        try:
+            resp = httpx.get(
+                "https://api.adzuna.com/v1/api/jobs/in/search/1",
+                params={"app_id": app_id, "app_key": app_key, "results_per_page": 1},
+                timeout=8.0,
+            )
+            if resp.status_code == 200:
+                row("Adzuna (India + 6 more)",
+                    bool(adz.get("enabled")),
+                    f"key verified live" + ("" if adz.get("enabled")
+                                             else " — set sources.adzuna.enabled: true"))
+            elif resp.status_code == 401:
+                row("Adzuna (India + 6 more)", False,
+                    "app_id/app_key rejected (HTTP 401) — check developer.adzuna.com")
+            else:
+                row("Adzuna (India + 6 more)", False, f"HTTP {resp.status_code}")
+        except httpx.HTTPError as exc:
+            row("Adzuna (India + 6 more)", False, f"{type(exc).__name__}: {exc}")
+
+    # --- Mailbox: a real IMAP login (see test_connection docstring) rather
+    # than a config-presence check.
+    mail = sources.get("mailbox") or {}
+    if not mail.get("enabled"):
+        pw_var = mail.get("password_env", "JOBAGENT_MAIL_PASSWORD")
         missing = []
-        if not has_user:
+        if not mail.get("user"):
             missing.append("set sources.mailbox.user")
-        if not has_pw:
+        if not os.environ.get(pw_var):
             missing.append(f"set the {pw_var} env var (app password)")
-        if not mail.get("enabled"):
-            missing.append("set sources.mailbox.enabled: true")
+        missing.append("set sources.mailbox.enabled: true")
         row("Job-alert email (Naukri/LinkedIn)", False, "; ".join(missing))
+    else:
+        ok, detail = _mailbox_test_connection(mail)
+        row("Job-alert email (Naukri/LinkedIn)", ok, detail)
+
+    # --- Enrichment adapters: one real minimal call each, not a
+    # config/env-var presence check — the same standard as everything above.
+    enrichment = config.get("enrichment") or {}
+    exa_cfg = enrichment.get("exa") or {}
+    if exa_cfg.get("enabled"):
+        from jobagent.enrich import ExaError, exa_search
+        try:
+            results = exa_search("test", num_results=1)
+            row("Exa (company/job discovery)", True, f"key verified live ({len(results)} result)")
+        except ExaError as exc:
+            row("Exa (company/job discovery)", False, str(exc))
+    else:
+        row("Exa (company/job discovery)", False, "enrichment.exa.enabled is false")
+
+    firecrawl_cfg = enrichment.get("firecrawl") or {}
+    if firecrawl_cfg.get("enabled"):
+        from jobagent.enrich import FirecrawlError, firecrawl_scrape
+        try:
+            page = firecrawl_scrape("https://example.com")
+            row("Firecrawl (page extraction)", True,
+                f"key verified live ({len(page['markdown'])} chars from example.com)")
+        except FirecrawlError as exc:
+            row("Firecrawl (page extraction)", False, str(exc))
+    else:
+        row("Firecrawl (page extraction)", False, "enrichment.firecrawl.enabled is false")
+
+    browserbase_cfg = enrichment.get("browserbase") or {}
+    if browserbase_cfg.get("enabled"):
+        key_env = browserbase_cfg.get("api_key_env", "BROWSERBASE_API_KEY")
+        row("Browserbase (hosted browser)", bool(os.environ.get(key_env)),
+            f"{key_env} {'set' if os.environ.get(key_env) else 'not set'} — not live-checked (no adapter built, unused)")
+    else:
+        row("Browserbase (hosted browser)", False, "disabled — no current task needs it")
+
+    # --- Gmail: confirm OAuth is set up (credentials.json present) without
+    # forcing a browser consent flow just to run check-setup.
+    gmail_cfg = (config.get("outreach") or {}).get("gmail") or {}
+    if gmail_cfg.get("enabled"):
+        from jobagent.outreach.gmail import CREDENTIALS_PATH, TOKEN_PATH
+        if TOKEN_PATH.exists():
+            row("Gmail (draft creation)", True, f"authorized — token at {TOKEN_PATH.name}")
+        elif CREDENTIALS_PATH.exists():
+            row("Gmail (draft creation)", False,
+                f"credentials.json present but not yet authorized — run once to complete OAuth consent")
+        else:
+            row("Gmail (draft creation)", False, f"{CREDENTIALS_PATH.name} not found — see SETUP.md")
+    else:
+        row("Gmail (draft creation)", False, "outreach.gmail.enabled is false")
 
     console.print(t)
     console.print("\nFull walkthrough: [bold]SETUP.md[/bold]")
     console.print("Verify the mailbox once configured: [bold]python run.py mailbox-test[/bold]")
+
+
+def cmd_gmail_auth(_args) -> None:
+    """One-time Gmail OAuth consent. Run this yourself, interactively — it
+    opens your real browser and needs you to click Allow. There is no way
+    to automate that click, and there shouldn't be: it's you granting this
+    tool access to your Gmail account, not a step to script around.
+    """
+    from jobagent.outreach.gmail import GmailAuthError, authenticate, get_authenticated_sender
+
+    console.print("[bold]Opening your browser for Gmail consent...[/bold]")
+    console.print("If nothing opens, check for a popup blocker or a URL printed below to open by hand.\n")
+    try:
+        creds = authenticate()
+        sender = get_authenticated_sender(creds)
+    except GmailAuthError as exc:
+        console.print(f"[red]Gmail auth failed ({exc.kind}):[/red] {exc}")
+        return
+    console.print(f"[green]Authorized.[/green] Drafts will be created as: [bold]{sender}[/bold]")
+    console.print("Token saved to token.json — future runs won't re-prompt unless it's deleted or revoked.")
 
 
 def cmd_rescore(args) -> None:
@@ -568,21 +700,35 @@ def cmd_rescore(args) -> None:
     everywhere. Deterministic and free — no LLM calls.
     """
     config = load_yaml("config.yaml")
+    llm_cfg = config.get("llm", {})
     profile = load_profile(ROOT / config.get("profile_file", "profile.yaml"))
     store = Store(ROOT / "jobs.db",
                   store_raw=config.get("retention", {}).get("store_raw", False))
+    pv = policy_version(profile, llm_cfg)
 
     rows = store.conn.execute("SELECT * FROM seen").fetchall()
     console.print(f"[bold]Re-scoring {len(rows)} stored jobs[/bold] under current rules\n")
 
-    changed = demoted = 0
+    changed = demoted = reclassified = 0
     with console.status("Re-scoring...") as status:
         for i, row in enumerate(rows, 1):
             job = row_to_job(dict(row))
             before_score, before_cat = job.score, job.match_category
+            before_family, before_candidate = row["role_family"], bool(row["candidate"])
             job.apply_classification(classify(job, profile))
             job.scored_by = "rules"          # a rules pass, not an LLM verdict
             rule_match(job, profile)          # applies the scope cap too
+
+            # Stage-1 fields (role_family/candidate/base_score/...) must be
+            # persisted whenever they changed, independent of whether the
+            # final score/category also changed — record_match alone never
+            # writes them, which is exactly repo audit finding #13: a
+            # reclassification's role_family/candidate/base_score stayed
+            # permanently stale in the DB even after match_category updated.
+            if job.role_family != (before_family or "") or job.candidate != before_candidate:
+                store.record_classification(job, pv)
+                reclassified += 1
+
             if job.score != before_score or job.match_category != before_cat:
                 changed += 1
                 if job.match_category in ("D", "E") and before_cat in ("A", "B", "C"):
@@ -591,6 +737,7 @@ def cmd_rescore(args) -> None:
             if i % 500 == 0:
                 status.update(f"Re-scoring... {i}/{len(rows)}")
 
+    console.print(f"  {reclassified} jobs got an updated stage-1 classification persisted")
     console.print(f"  {changed} jobs changed verdict")
     console.print(f"  [bold]{demoted}[/bold] dropped out of A/B/C — out of scope "
                   f"under the current location / QA-role rules")
@@ -799,6 +946,9 @@ def main() -> None:
 
     sub.add_parser("check-setup", help="what is connected, what is missing"
                    ).set_defaults(func=cmd_check_setup)
+
+    sub.add_parser("gmail-auth", help="one-time Gmail OAuth consent (opens your browser)"
+                   ).set_defaults(func=cmd_gmail_auth)
 
     sub.add_parser("rescore", help="re-apply current rules to every stored job"
                    ).set_defaults(func=cmd_rescore)

@@ -163,10 +163,23 @@ def _parse_subject_job(subject: str, sender: str, body: str,
         return None
 
     # Prefer the per-job apply link. Only it identifies the posting.
+    #
+    # The `mid` digits come straight from the mail body with no sanity check
+    # or cross-reference (repo audit 2026-09-07 finding #9: a bogus
+    # `mid=999999999999` was accepted and turned into a URL indistinguishable
+    # from a real one). A live GET against the constructed URL is not a fix
+    # here — it timed out against Naukri's own bot protection during the
+    # audit, and repeatedly hitting Naukri programmatically to "verify" a
+    # link would itself edge toward the unauthorized-scraping behavior this
+    # module exists specifically to avoid (see the module docstring). The
+    # real, bounded fix is a plausibility check on the identifier shape plus
+    # an honest caveat on the job record when the URL is unverified.
     url = ""
+    url_unverified = False
     apply_link = RE_NAUKRI_APPLY.search(body or "")
-    if apply_link:
+    if apply_link and 5 <= len(apply_link.group("mid")) <= 15:
         url = f"https://www.naukri.com/job-listings-{apply_link.group('mid')}"
+        url_unverified = True
     else:
         for raw_url, _text in ANCHOR.findall(body or ""):
             cleaned = _clean_url(raw_url)
@@ -187,6 +200,19 @@ def _parse_subject_job(subject: str, sender: str, body: str,
     seen_urls.add(key)
 
     portal = _portal_for(url) or "naukri"
+    # This description is a templated placeholder, not the real job text
+    # (repo audit 2026-09-07 finding #8). That is a deliberate consequence of
+    # this module's design, not an oversight to patch with a scraper: Naukri
+    # (like LinkedIn/Indeed) has no public API and prohibits automated
+    # access (see module docstring), so fetching the landing page to pull a
+    # full JD would cross into exactly the unauthorized scraping this
+    # mailbox-reading approach exists to avoid. Title/company/location is
+    # genuinely all that's available without violating that boundary.
+    caveat = (
+        " Link constructed from an email identifier and not independently "
+        "verified — confirm it resolves before relying on it."
+        if url_unverified else ""
+    )
     return Job(
         source=f"mail/{portal}",
         company=_sender_name(sender) or portal,
@@ -197,7 +223,9 @@ def _parse_subject_job(subject: str, sender: str, body: str,
         description=(
             f"Recruiter email from {_sender_name(sender)} via {portal}. "
             f"Subject: {subject}. Location: {location}. "
-            f"Open the link for the full description."
+            f"Open the link for the full description — this module "
+            f"deliberately does not fetch the landing page (see source "
+            f"docstring).{caveat}"
         ),
         posted_at=posted,
     )
@@ -255,12 +283,48 @@ def parse_message(msg, seen_urls: set[str]) -> list[Job]:
                 workplace=infer_workplace(title, subject),
                 description=(
                     f"Job alert from {portal} (email: {subject}). "
-                    f"Sender: {sender}. Full description is on the posting page."
+                    f"Sender: {sender}. Full description is on the posting "
+                    f"page — this module deliberately does not fetch it "
+                    f"(see source docstring: {portal} prohibits automated "
+                    f"access, and this is a placeholder, not missing data)."
                 ),
                 posted_at=posted,
             )
         )
     return jobs
+
+
+def test_connection(cfg: dict, timeout: float = 10.0) -> tuple[bool, str]:
+    """Minimal, safe live check: log in and immediately log out. No message
+    search, no fetch — just proves the host/port/credentials actually work.
+
+    Added for `check-setup` (repo audit 2026-09-07 finding #10): before this,
+    `check-setup` reported the mailbox as "connected" whenever the config
+    fields and env var were merely PRESENT, never actually attempting a
+    connection — so a revoked app password still showed green.
+    """
+    if not cfg or not cfg.get("enabled"):
+        return False, "mailbox.enabled is false"
+    host = cfg.get("host", "imap.gmail.com")
+    port = int(cfg.get("port", 993))
+    user = cfg.get("user") or os.environ.get("JOBAGENT_MAIL_USER", "")
+    password = os.environ.get(cfg.get("password_env", "JOBAGENT_MAIL_PASSWORD"), "")
+    if not user or not password:
+        return False, "user or password env var not set"
+    try:
+        conn = imaplib.IMAP4_SSL(host, port, timeout=timeout)
+        try:
+            conn.login(user, password)
+            return True, f"logged in as {user}"
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+    except imaplib.IMAP4.error as exc:
+        return False, f"IMAP error: {exc}"
+    except OSError as exc:
+        return False, f"connection failed: {exc}"
 
 
 def fetch_mailbox(cfg: dict) -> tuple[list[Job], list[str]]:

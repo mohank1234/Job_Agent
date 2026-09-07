@@ -135,7 +135,7 @@ class Store:
             self.conn.execute(stmt)
 
     # ------------------------------------------------------------ retention
-    def upsert_all(self, jobs: list[Job]) -> tuple[int, int]:
+    def upsert_all(self, jobs: list[Job], policy_version: str = "") -> tuple[int, int]:
         """Store every job. Returns (newly_seen, already_known).
 
         first_seen is preserved across runs; last_seen always advances.
@@ -144,6 +144,13 @@ class Store:
         EVERY job, so nothing sits in the database uncategorised — including
         the postings that will never be sent to the LLM. An existing LLM
         verdict on unchanged content is never overwritten by a rules verdict.
+
+        `policy_version` must be the same value the scoring pass will use in
+        `cached_match`/`apply_cached` (matcher.policy_version(profile,
+        llm_cfg)) — the ON CONFLICT clause below decides whether to keep an
+        existing LLM verdict by comparing stored vs. freshly-computed
+        content_hash, and both hashes must be computed under the same policy
+        for that comparison to mean anything.
         """
         now = _now()
         new = known = 0
@@ -245,7 +252,7 @@ class Store:
                     job.role_family, job.role_label, job.role_tier, job.seniority,
                     job.base_score, int(job.candidate), _dumps(job.evidence),
                     _dumps(job.gap_terms), job.years_required,
-                    _dumps(job.classification_notes), job.content_hash,
+                    _dumps(job.classification_notes), job.content_hash(policy_version),
                     first_seen, now,
                     job.score, job.match_category, job.match_category,
                     job.match_category_label, job.priority,
@@ -258,9 +265,11 @@ class Store:
         return new, known
 
     # -------------------------------------------------------------- scoring
-    def cached_match(self, job: Job) -> dict | None:
-        """Previous match for an UNCHANGED posting, so we never pay to rescore
-        something that hasn't materially changed."""
+    def cached_match(self, job: Job, policy_version: str = "") -> dict | None:
+        """Previous match for an UNCHANGED posting under the SAME matching
+        policy, so we never pay to rescore something that hasn't materially
+        changed — and never silently reuse a verdict computed under an old
+        profile/prompt/model (repo audit 2026-09-07 finding #3)."""
         row = self.conn.execute(
             """SELECT score, match_category, match_category_label, priority,
                       why_matches, matching_skills, missing_skills,
@@ -271,14 +280,14 @@ class Store:
         ).fetchone()
         if not row or not row["last_scored"]:
             return None
-        if row["content_hash"] != job.content_hash:
-            return None                      # description changed -> rescore
+        if row["content_hash"] != job.content_hash(policy_version):
+            return None                      # description or policy changed -> rescore
         if (row["scored_by"] or "") not in ("llm", "cache"):
             return None                      # only LLM verdicts are worth reusing
         return dict(row)
 
-    def apply_cached(self, job: Job) -> bool:
-        cached = self.cached_match(job)
+    def apply_cached(self, job: Job, policy_version: str = "") -> bool:
+        cached = self.cached_match(job, policy_version)
         if not cached:
             return False
         job.score = cached["score"] or 0
@@ -311,6 +320,36 @@ class Store:
         values.append(job.fingerprint)
         self.conn.execute(
             f"UPDATE seen SET {', '.join(fields)} WHERE fingerprint = ?", values
+        )
+        self.conn.commit()
+
+    def record_classification(self, job: Job, policy_version: str = "") -> None:
+        """Persist the stage-1 classification fields (role_family, candidate,
+        base_score, etc.) plus content_hash.
+
+        `record_match` alone does NOT write these — it only persists the
+        stage-2 match fields (score/category/priority/...). `rescore`
+        recomputes classification for stored rows outside the normal
+        fetch -> upsert_all path, and calling only `record_match` after that
+        left role_family/candidate/base_score permanently stale even though
+        match_category had updated (repo audit 2026-09-07 finding #13,
+        reproduced against a throwaway db). Call this alongside
+        `record_match` whenever classification was recomputed for an
+        already-stored row.
+        """
+        self.conn.execute(
+            """UPDATE seen SET
+                   role_family=?, role_label=?, role_tier=?, seniority=?,
+                   base_score=?, candidate=?, evidence=?, gap_terms=?,
+                   years_required=?, classification_notes=?, content_hash=?
+               WHERE fingerprint = ?""",
+            (
+                job.role_family, job.role_label, job.role_tier, job.seniority,
+                job.base_score, int(job.candidate), _dumps(job.evidence),
+                _dumps(job.gap_terms), job.years_required,
+                _dumps(job.classification_notes), job.content_hash(policy_version),
+                job.fingerprint,
+            ),
         )
         self.conn.commit()
 

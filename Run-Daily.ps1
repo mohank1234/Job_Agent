@@ -161,12 +161,28 @@ if (-not $env:GEMINI_API_KEY) {
 $env:PYTHONIOENCODING = "utf-8"
 
 # --- 2. Fetch ---------------------------------------------------------------
+# `fetch` almost never exits nonzero even when a source fails outright — a
+# bad ATS slug or a rejected mailbox login used to vanish into a discarded
+# error with the exit code staying 0 (repo audit 2026-09-07 finding #1 and
+# #14: "success" was reported with zero verification that sources actually
+# came back). Since that fix, per-source failures surface as "note:" lines
+# in fetch's own output; scan for them here so a degraded run is at least
+# visibly flagged, without turning source flakiness into a full pipeline
+# failure — a digest built from partial coverage is still useful, and
+# `Preserve successful partial results and record failures separately` per
+# policy, not `failed request -> no jobs available`.
+$sourceCoverageIssues = @()
 if (-not $SkipFetch) {
     Write-Log "Fetching all sources..."
-    python run.py fetch --limit 120 2>&1 | Write-LogStream
+    $fetchOutput = python run.py fetch --limit 120 2>&1
+    $fetchOutput | Write-LogStream
     if ($LASTEXITCODE -ne 0) {
         $failures += "fetch exited $LASTEXITCODE"
         Write-Log "ERROR: fetch failed (exit $LASTEXITCODE)."
+    }
+    $sourceCoverageIssues = @($fetchOutput | Select-String -Pattern "note:\s*(ATS |mailbox:)")
+    if ($sourceCoverageIssues.Count -gt 0) {
+        Write-Log "WARNING: $($sourceCoverageIssues.Count) source(s) failed this run - digest coverage is partial. See notes above."
     }
     Write-Log "Fetch complete"
 }
@@ -254,7 +270,11 @@ if ($lock) { $lock.Close() }
 
 if ($failures.Count -eq 0) {
     Set-Content -Path $marker -Value $today -Encoding UTF8
-    Write-Log "=== Done. Digest: digest_$today.md ==="
+    if ($sourceCoverageIssues.Count -gt 0) {
+        Write-Log "=== Done WITH PARTIAL COVERAGE: digest_$today.md ($($sourceCoverageIssues.Count) source(s) failed - see WARNING above) ==="
+    } else {
+        Write-Log "=== Done. Digest: digest_$today.md ==="
+    }
     exit 0
 }
 

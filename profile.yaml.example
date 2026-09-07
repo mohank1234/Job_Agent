@@ -1,0 +1,695 @@
+# EXAMPLE / TEMPLATE — copy this to profile.yaml and replace every value
+# below with your own. profile.yaml is gitignored (it's your real career
+# history), so a fresh checkout has none until you create one from this file
+# (repo audit 2026-09-07 finding #11).
+#
+#     cp profile.yaml.example profile.yaml
+#
+# The `target_roles` and `skills` sections below are a generic QA/test/AI-
+# eval title taxonomy, not personal data — keep or trim them, they're meant
+# to be reused. `identity` and the company lists under `preferences` ARE
+# personal and are shown here only as placeholders — replace them.
+#
+# =============================================================================
+# CENTRAL CAREER PROFILE
+# =============================================================================
+# This is the single source of truth for who the candidate is and what roles
+# are worth applying for. jobagent/profile.py loads it; roles.py and matcher.py
+# read it. Nothing about the candidate is hardcoded in Python.
+#
+# Edit this file to retune the agent. Do not duplicate any of it in code.
+# =============================================================================
+
+identity:
+  headline: "PLACEHOLDER — e.g. 'Software QA Engineer' or 'Backend Developer'"
+
+  # Experience is a FLEXIBLE matching factor, never a hard filter.
+  # `years` describes reality; `stretch_years` is how far above that a stated
+  # requirement can go before the match is materially penalised.
+  experience:
+    years: 0                  # PLACEHOLDER — your real years of experience
+    level: mid_senior          # see seniority.self_level below
+    stretch_years: 3           # a 5-yr profile still competes for ~8-yr asks
+    hard_gap_years: 6          # beyond this the gap is genuinely large
+
+  # Free text the LLM reasons over. Keep it honest — it is scored against
+  # reality, and inventing experience produces useless matches.
+  summary: |
+    PLACEHOLDER — replace with your own honest summary of experience, core
+    skills, and what you do NOT claim. This is what the LLM reasons over when
+    scoring a posting against you, so specificity here directly improves
+    match quality. See README.md for the shape this section should take.
+
+# -----------------------------------------------------------------------------
+# TARGET ROLES — roles are the primary discovery signal, not technologies.
+# Tier 1 = core target. Tier 2 = strong adjacent. Tier 3 = consider when the
+# actual responsibilities overlap. Titles here are examples; roles.py matches
+# semantically-equivalent variants, it does not string-compare this list.
+# -----------------------------------------------------------------------------
+target_roles:
+  tier_1:
+    core_qa:
+      - Senior QA Engineer
+      - QA Engineer
+      - Senior Software QA Engineer
+      - Software QA Engineer
+      - Senior Software Test Engineer
+      - Software Test Engineer
+      - Senior Test Engineer
+      - Test Engineer
+      - Quality Engineer
+      - Senior Quality Engineer
+      - Software Quality Engineer
+      - Quality Assurance Engineer
+      - Senior Quality Assurance Engineer
+      - QA Analyst
+      - Test Analyst
+
+    automation_sdet:
+      - Senior SDET
+      - SDET
+      - Software Development Engineer in Test
+      - Senior QA Automation Engineer
+      - QA Automation Engineer
+      - Senior Test Automation Engineer
+      - Test Automation Engineer
+      - Automation Test Engineer
+      - Automation QA Engineer
+      - QA Engineer - Automation
+      - Quality Engineer - Automation
+
+    ai_llm_qa:
+      - AI QA Engineer
+      - AI Test Engineer
+      - AI Quality Engineer
+      - AI Evaluation Engineer
+      - AI Validation Engineer
+      - AI Application Test Engineer
+      - AI/ML Test Engineer
+      - LLM QA Engineer
+      - LLM Test Engineer
+      - LLM Evaluation Engineer
+      - LLM Quality Engineer
+      - GenAI QA Engineer
+      - GenAI Test Engineer
+      - Generative AI QA Engineer
+      - Generative AI Test Engineer
+      - AI Model Evaluation Engineer
+      - AI Model Validation Engineer
+
+  tier_2:
+    rag_agents:
+      - RAG QA Engineer
+      - RAG Test Engineer
+      - RAG Evaluation Engineer
+      - RAG Quality Engineer
+      - AI Agent QA Engineer
+      - AI Agent Test Engineer
+      - AI Agent Evaluation Engineer
+      - Agentic AI Test Engineer
+      - Agentic AI QA Engineer
+      - AI Workflow Test Engineer
+      - AI Copilot QA Engineer
+      - AI Copilot Test Engineer
+
+    conversational_ai:
+      - Chatbot QA Engineer
+      - Chatbot Test Engineer
+      - Conversational AI QA Engineer
+      - Conversational AI Test Engineer
+      - Conversational AI Quality Engineer
+      - AI Assistant QA Engineer
+      - Virtual Assistant Test Engineer
+      - Conversational Agent Test Engineer
+
+    computer_vision:
+      - Computer Vision QA Engineer
+      - Computer Vision Test Engineer
+      - Computer Vision Quality Engineer
+      - Vision Model Evaluation Engineer
+      - Vision Model Validation Engineer
+      - ML Model Test Engineer
+      - ML Model Evaluation Engineer
+
+    swe_quality:
+      - Software Engineer in Test
+      - Software Engineer - Test
+      - Software Engineer - QA
+      - Software Engineer - Quality
+      - Software Engineer - Automation
+      - Software Engineer - Test Automation
+      - Software Engineer - Quality Engineering
+      - Software Engineer - Developer Productivity
+      - Test Infrastructure Engineer
+      - Test Platform Engineer
+
+  # Tier 3 roles only qualify when the ACTUAL responsibilities overlap with the
+  # profile (testing, quality, evaluation, automation, API validation).
+  tier_3:
+    swe_ai:
+      - Software Engineer - AI Testing
+      - Software Engineer - AI Quality
+      - Software Engineer - AI Evaluation
+      - Software Engineer - LLM
+      - Software Engineer - GenAI
+      - Software Engineer - AI Applications
+      - Software Engineer - AI Agents
+      - Software Engineer - RAG
+    swe_generic:
+      - Software Engineer
+      - Software Developer
+      - Backend Engineer
+
+# -----------------------------------------------------------------------------
+# SKILLS — matching signals, NOT roles. Used to judge how strongly the
+# candidate matches a role that has already been identified.
+# -----------------------------------------------------------------------------
+skills:
+  qa:
+    - manual testing
+    - functional testing
+    - regression testing
+    - test case design
+    - test plan
+    - test strategy
+    - exploratory testing
+    - defect triage
+    - bug reporting
+    - root cause analysis
+    - root cause debugging
+    - debugging
+    - risk based testing
+    - smoke testing
+    - sanity testing
+    - integration testing
+    - system testing
+    - uat
+    - user acceptance testing
+    - cross browser testing
+    - test coverage
+    - qa process
+    - quality assurance
+    - agile
+    - scrum
+    - jira
+    - test management
+
+  automation:
+    - test automation
+    - automation framework
+    - selenium
+    - selenium webdriver
+    - playwright
+    - cypress
+    - appium
+    - testng
+    - junit
+    - pytest
+    - robot framework
+    - page object model
+    - e2e testing
+    - end to end testing
+    - ui automation
+    - regression suite
+    - cucumber
+    - bdd
+    - browserstack
+    - cross device testing
+    - jmeter
+    - jmeter framework
+    - performance testing
+    - load testing
+    - stress testing
+    - throughput
+    - response time
+
+  api:
+    - api testing
+    - rest api
+    - restful
+    - postman
+    - rest assured
+    - restassured
+    - api automation
+    - json schema validation
+    - graphql
+    - swagger
+    - openapi
+    - soap ui
+    - contract testing
+    - sql
+    - database testing
+
+  ci_cd:
+    - ci/cd
+    - jenkins
+    - github actions
+    - gitlab ci
+    - git
+    - github
+    - continuous integration
+    - build pipeline
+    - docker
+
+  # Using AI assistants to WRITE automation code is now a stated requirement in
+  # a growing share of QA postings. It is a distinct signal from testing AI.
+  ai_assisted_dev:
+    - github copilot
+    - copilot
+    - claude
+    - claude code
+    - chatgpt
+    - cursor
+    - windsurf
+    - ai coding assistant
+    - coding assistant
+    - ai pair programming
+    - ai assisted development
+    - ai assisted testing
+    - ai augmented testing
+    - prompt engineering
+
+  ai_llm:
+    - llm
+    - large language model
+    - genai
+    - generative ai
+    - foundation model
+    - prompt engineering
+    - prompt testing
+    - fine tuning
+    - openai
+    - anthropic
+    - claude
+    - gpt
+    - hugging face
+    - ai application
+    - ml model
+
+  evaluation:
+    - llm evaluation
+    - model evaluation
+    - ai evaluation
+    - eval harness
+    - evals
+    - benchmark
+    - benchmarking
+    - golden dataset
+    - llm as judge
+    - llm-as-a-judge
+    - ragas
+    - deepeval
+    - promptfoo
+    - langsmith
+    - langfuse
+    - trulens
+    - giskard
+    - evaluation framework
+    - eval framework
+    - hallucination
+    - groundedness
+    - citation validation
+    - factuality
+    - accuracy testing
+    - consistency testing
+    - response quality
+    - human evaluation
+    - annotation quality
+    - red teaming
+    - prompt injection
+    - model validation
+    - ground truth
+
+  rag:
+    - rag
+    - retrieval augmented generation
+    - retrieval-augmented
+    - vector database
+    - vector search
+    - embeddings
+    - chunking
+    - semantic search
+    - knowledge base
+    - context retrieval
+    - reranking
+
+  agents:
+    - ai agent
+    - agentic
+    - agentic ai
+    - multi agent
+    - tool calling
+    - function calling
+    - agent evaluation
+    - copilot
+    - ai workflow
+    - mcp
+
+  conversational:
+    - chatbot
+    - conversational ai
+    - virtual assistant
+    - ai assistant
+    - dialogue
+    - intent recognition
+    - nlu
+    - dialogflow
+    - voice assistant
+
+  computer_vision:
+    - computer vision
+    - image classification
+    - object detection
+    - opencv
+    - ocr
+    - image segmentation
+    - visual inspection
+    - vision model
+    - annotation
+
+  programming:
+    - python
+    - java
+    - javascript          # basics
+    - sql
+    - shell scripting
+
+# Skills the candidate does NOT have. Presence of these as hard requirements
+# is a gap to report, not an automatic rejection.
+gaps:
+  - kubernetes
+  - terraform
+  - aws certified
+  - spark
+  - hadoop
+  - kafka
+  - scala
+  - golang
+  - rust
+  - c++
+  - model training
+  - pytorch
+  - tensorflow
+  - deep learning research
+  - distributed systems design
+  - microservices architecture
+  - data pipeline engineering
+  - mlops
+
+# -----------------------------------------------------------------------------
+# SENIORITY — flexible. One reasonable level above the current level is fine
+# when the responsibilities and technical requirements match strongly.
+# -----------------------------------------------------------------------------
+seniority:
+  self_level: mid_senior            # junior < mid < mid_senior < senior < staff
+  acceptable:
+    - junior                        # accepted but scored down (backwards step)
+    - mid
+    - mid_senior
+    - senior
+    - lead                          # tech lead: consider, penalise modestly
+    - staff                         # stretch: consider only on strong match
+  reject:                           # substantially beyond the current level
+    - principal
+    - architect
+    - manager
+    - director
+    - head
+    - vp
+    - executive
+
+# -----------------------------------------------------------------------------
+# PREFERENCES — location / work mode. These affect the SCORE, they do not
+# delete jobs from the database.
+# -----------------------------------------------------------------------------
+preferences:
+  # Global search. Remote roles anywhere are in scope; onsite roles are in
+  # scope in these markets. Locations affect the SCORE, never storage.
+  locations:
+    # India — home market, no visa needed
+    - india
+    - bengaluru
+    - bangalore
+    - hyderabad
+    - pune
+    - chennai
+    - mumbai
+    - delhi
+    - noida
+    - gurgaon
+    - gurugram
+    # United States
+    - united states
+    - usa
+    - "u.s."
+    - new york
+    - san francisco
+    - seattle
+    - austin
+    - boston
+    - chicago
+    - atlanta
+    - denver
+    - texas
+    - california
+    # United Kingdom / Ireland
+    - united kingdom
+    - " uk"
+    - england
+    - london
+    - manchester
+    - edinburgh
+    - dublin
+    - ireland
+    # Saudi Arabia and the Gulf
+    - saudi
+    - saudi arabia
+    - riyadh
+    - jeddah
+    - dammam
+    - neom
+    - uae
+    - united arab emirates
+    - dubai
+    - abu dhabi
+    - sharjah
+    - qatar
+    - doha
+    - kuwait
+    - bahrain
+    - manama
+    - oman
+    - muscat
+    # Wider Arab world
+    - egypt
+    - cairo
+    - jordan
+    - amman
+    - lebanon
+    - morocco
+    - tunisia
+    # Other markets worth onsite/hybrid consideration
+    - singapore
+    - canada
+    - toronto
+    - australia
+    - sydney
+    - germany
+    - berlin
+    - netherlands
+    - amsterdam
+    - poland
+    - portugal
+    - lisbon
+    - spain
+    # Remote anywhere
+    - remote
+    - anywhere
+    - worldwide
+    - global
+
+  # ---------------------------------------------------------------------
+  # WORK-LOCATION POLICY
+  #   Remote      -> anywhere. India-based or foreign employer, both fine.
+  #   Onsite/hybrid -> INDIA ONLY, and only in the cities below.
+  #                    No onsite or hybrid role outside India at any salary.
+  # ---------------------------------------------------------------------
+  # STRICT: only postings whose TITLE names a QA / testing / evaluation role.
+  # Developer roles are excluded even when their description is full of
+  # testing words.
+  qa_roles_only: true
+
+  remote_preference: strong          # none | mild | strong
+  remote_scope: anywhere             # remote for a foreign employer is fine
+  workplace_ok: [remote, hybrid, onsite, unknown]
+
+  # Onsite/hybrid is HYDERABAD in India. Singapore is the one place abroad
+  # that is in scope, and only when the employer can actually sponsor an
+  # Employment Pass — see the singapore block below. Anywhere else, in India
+  # or abroad, is out however good the role is.
+  onsite_cities:
+    # PLACEHOLDER — your acceptable onsite/hybrid cities, ranked groups
+    # (first group = most preferred). Whatever you list here is what the
+    # matcher and the LLM prompt (Profile.geography_rule) actually enforce.
+    - [your-city]
+
+  onsite_abroad: false               # or e.g. "singapore_only" — see below
+  relocation: none                   # PLACEHOLDER — your real relocation policy
+
+  # ---------------------------------------------------------------------
+  # SINGAPORE / EMPLOYMENT PASS
+  # A Singapore onsite role is only real if the employer can sponsor an
+  # Employment Pass. The EP has a hard salary floor set by MOM, so the
+  # advertised salary decides eligibility as a matter of law, not opinion.
+  # Figures are the 2026 floors for the youngest applicants and rise with
+  # age; from 1 Jan 2027 the general floor becomes 6000.
+  # Source: MOM. Re-check yearly - these change every January.
+  # ---------------------------------------------------------------------
+  singapore:
+    ep_min_monthly_sgd: 5600         # most sectors, 2026
+    ep_min_monthly_sgd_finance: 6200 # financial services, 2026
+    # Salary at or above the floor means an EP is legally possible. Below it,
+    # the employer cannot sponsor you whatever the posting says.
+    treat_below_floor_as_ineligible: true
+
+  visa_note: >
+    PLACEHOLDER — replace with your own work-authorization situation: your
+    home country, which remote arrangements you can actually accept, and any
+    onsite/hybrid locations where you'd need visa sponsorship (see the
+    `singapore` block above for how one country's sponsorship rule is
+    modeled — copy that pattern for any other country you need).
+
+  # ---------------------------------------------------------------------
+  # EMPLOYER QUALITY
+  # Product companies that pay 30+ LPA in India. A posting from one of these
+  # is worth more than the same role at a staffing firm, so they get a score
+  # bonus. Matching is on the company name, case-insensitive, word-anchored.
+  # ---------------------------------------------------------------------
+  preferred_companies:
+    # PLACEHOLDER — companies you specifically want a score bonus for, even
+    # with no ATS board tracked (see companies.yaml for boards that ARE
+    # polled). Matching is on the company name, case-insensitive,
+    # word-anchored. This list grows over time as you research companies —
+    # a few examples to show the format:
+    - example-company-one
+    - example-company-two
+    - example-company-three
+
+  # Staffing / recruitment firms whose names carry no obvious marker. Generic
+  # markers (consultancy, manpower, staffing, recruitment...) are detected in
+  # roles.py; this list is for the ones you can only know by name. Add to it
+  # whenever a middleman shows up in your digest.
+  staffing_companies:
+    - allegis
+    - nityo
+    - randstad
+    - adecco
+    - manpowergroup
+    - kelly services
+    - hays
+    - robert half
+    - collabera
+    - teksystems
+    - insight global
+    - apex systems
+    - artech
+    - diverse lynx
+    - mastech
+    - sysmind
+    - photon
+    - iris software
+    - v-soft
+    - infojini
+    - kforce
+    - judge group
+    - michael page
+    - abc consultants
+    - careernet
+    - xpheno
+    - quess
+    - teamlease
+    - aaksar
+    - sketchhr
+    - sequoia connect
+
+  # Score bonus for a preferred employer, penalty for a staffing agency.
+  preferred_company_bonus: 12
+  staffing_agency_penalty: 14
+
+  # Compensation context for the LLM's judgement. Rarely stated in postings,
+  # so it informs the recommendation — it is never a filter.
+  current_ctc_lpa: 0                 # PLACEHOLDER — your real current comp
+  min_ctc_lpa: 0                     # PLACEHOLDER — will not move for less
+  target_ctc_lpa: 0                  # PLACEHOLDER — top of your realistic range
+
+# -----------------------------------------------------------------------------
+# EXCLUSIONS — these DOWNGRADE a job (category E). They never delete it from
+# the database.
+# -----------------------------------------------------------------------------
+exclusions:
+  title_terms:
+    - intern
+    - internship
+    - apprentice
+    - graduate program
+    - trainee program
+    - unpaid
+    - volunteer
+    - recruiter
+    - sales
+    - account executive
+    - customer success
+    - marketing
+    - designer
+    - copywriter
+    - accountant
+    - hr
+    - paralegal
+    - nurse
+    - teacher
+    - driver
+  # Domains that are simply a different job family. Still stored, scored low.
+  off_domain_titles:
+    - data scientist
+    - data engineer
+    - data analyst
+    - devops engineer
+    - site reliability engineer
+    - cloud engineer
+    - security engineer
+    - network engineer
+    - solutions architect
+    - product manager
+    - project manager
+    - business analyst
+    - scrum master
+    - technical writer
+    - ui/ux
+    - user researcher
+    - user experience researcher
+    - research scientist
+    - applied scientist
+    - prompt engineer
+    - forward deployed engineer
+    - performance engineer
+    - developer advocate
+    - developer relations
+    - support engineer
+    - implementation engineer
+    - sales engineer
+    - solutions engineer
+    - frontend engineer
+    - front end engineer
+    - android engineer
+    - ios engineer
+    - mobile engineer
+    - machine learning engineer
+    - research scientist
+    - hardware engineer
+    - firmware engineer
+    - electrical engineer
+    - mechanical engineer
+    - quality control inspector
+    - quality manager
+    - supplier quality
+    - manufacturing quality

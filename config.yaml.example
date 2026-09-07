@@ -1,0 +1,284 @@
+# EXAMPLE / TEMPLATE — copy this to config.yaml and edit it. config.yaml is
+# gitignored (it carries your real mailbox address), so a fresh checkout has
+# no config.yaml at all until you create one from this file (repo audit
+# 2026-09-07 finding #11: without this, every command failed immediately
+# with "Missing config.yaml" on a clean clone).
+#
+#     cp config.yaml.example config.yaml
+#
+# Run configuration.
+#
+# YOUR CAREER PROFILE LIVES IN profile.yaml — target roles, skills, seniority,
+# locations and exclusions. This file only configures how the agent runs.
+#
+# The old `profile:` and `filters:` blocks are gone: they drove a keyword
+# prefilter that deleted jobs before storage. The pipeline now stores every
+# job and classifies it instead. See profile.yaml.
+
+profile_file: profile.yaml
+
+llm:
+  # PROVIDER. Researched and benchmarked 2026-08-20 for THIS workload
+  # (~10 calls/day, ~5-8k tokens per 4-job batch):
+  #
+  #   gemini  10 req/min | 250,000 tok/min | 500-1500 req/day  <- BEST, default
+  #   groq    30 req/min |   8,000 tok/min | 1000 req/day      <- throttles a batch
+  #   cerebras           | 8,192-token CONTEXT CAP             <- cannot fit 4 JDs
+  #   omnirate (free pool) 6-40 s/job, fails ~1 call in 3      <- was the default
+  #
+  # Gemini wins on token headroom, has native JSON-schema output, and its free
+  # tier needs no card. Get a key in 60s: https://aistudio.google.com/apikey
+  # then:  setx GEMINI_API_KEY "your-key"   (reopen the terminal afterwards)
+  provider: gemini
+
+  # MEASURED 2026-08-20 on real 6-job batches through this pipeline:
+  #   gemini-flash-lite-latest  0.6 s/job   6/6 scored
+  #   gemini-flash-latest       1.6 s/job   6/6 scored  <- primary
+  #   gemini-3-flash-preview    1.7 s/job   6/6 scored
+  #   gemma-4-31b-it            5.1 s/job   6/6 scored
+  #   (old OmniRoute free pool 6-43 s/job, failed 1 call in 3)
+  #
+  # flash-latest is a rolling alias, so it will not vanish the way a
+  # "-preview" id can - that matters for an unattended daily task. It also
+  # discriminated best below the scope cap (scores 32/36 where the others
+  # flattened everything to 40).
+  #
+  # NOTE: gemini-2.5-flash 404s on this key; do not use it.
+  model: gemini-flash-latest
+  api_key_env: GEMINI_API_KEY
+
+  # Tried in order if the primary errors or is rate-limited.
+  fallback_models:
+    - gemini-3-flash-preview
+    - gemini-flash-lite-latest
+
+  batch_size: 6            # Gemini's token headroom allows bigger batches
+  max_tokens: 30000        # Gemini spends tokens THINKING before it answers;
+                           # a small budget returns finish_reason=length and
+                           # zero output. This is the fix, not an extravagance.
+  timeout_seconds: 120
+  retries: 2               # per batch, with exponential backoff
+  backoff_seconds: 4
+  max_jobs_per_run: 60
+
+  # How much the LLM verdict counts vs the deterministic role/skill score.
+  # Measured note: 28 of the 40 jobs ever shown were surfaced by the rules
+  # alone, so this layer is an enhancement, not the engine.
+  llm_weight: 0.75
+
+  # Cost guard. Gemini and Groq free tiers are genuinely free, but their model
+  # ids do not contain the word "free", so the old name-based check cannot
+  # apply. Providers on this list are trusted as free-tier.
+  free_models_only: true
+  free_providers: [gemini, groq, omnirate]
+
+  effort: high             # anthropic provider only; ignored by the others
+
+retention:
+  # RETENTION IS NON-DESTRUCTIVE BY DESIGN.
+  #
+  # The requirement for this project is that every fetched job stays in
+  # jobs.db: postings that do not fit are CLASSIFIED as D (low) or E (not
+  # relevant), never deleted. Freshness is a digest concern, not a storage
+  # concern — see `digest.max_age_days` below.
+  #
+  # `null` = store everything, drop nothing. Setting a number here makes the
+  # pipeline discard older postings BEFORE they are stored, which breaks that
+  # guarantee. Leave it null unless you deliberately want a lossy database.
+  max_age_days: null
+
+  # Postings with no published date are kept (several boards never publish
+  # one) and sort last in the digest, labelled "date unknown".
+  keep_undated: true
+
+  # Deleting non-matching jobs from jobs.db. OFF: category D/E rows are the
+  # record of what was considered and rejected, and they are what makes
+  # "why didn't it show me X?" answerable. Turning this on deletes them and
+  # leaves only a fingerprint tombstone.
+  prune_non_matching: false
+  prune_categories: [D, E]
+
+  # The raw source payload duplicates `description` and the parsed columns and
+  # nothing reads it. It was 53% of the database. Off = ~80% smaller rows.
+  store_raw: false
+
+matching:
+  # STRICT MODE. Only postings whose TITLE names a QA / testing / evaluation
+  # role become candidates. Developer roles ("Software Engineer, Generative
+  # AI", "Senior Software Engineer, Agents") are excluded even when their
+  # description is full of testing words. Set false to let SWE roles back in.
+  qa_roles_only: true
+
+digest:
+  # ONE JOB, ONE DIGEST. A job that appeared in an earlier day's file is never
+  # shown again, so each day's digest is only what you have not already seen.
+  # An empty digest is a valid result - it means nothing new turned up.
+  # Jobs reported earlier TODAY still appear, so the evening catch-up run does
+  # not erase what the morning run found.
+  only_new: false
+
+  # FRESHNESS WINDOW. Postings older than this are still stored and still
+  # classified, but they are not scored by the LLM and not shown. Fourteen days
+  # is a practical default for a backlog-heavy search; this keeps the digest
+  # useful when strong matches exist but are slightly older.
+  max_age_days: 14
+
+  # Ordering. The digest leads with freshness — these boundaries in days map to
+  # the "last 24 hours / 2 days / 4 days" sections. Fit orders within each.
+  freshness_tiers_days: [1, 2, 4]
+
+sources:
+  ats: true                # company boards from companies.yaml (highest signal)
+  remoteok: true
+  arbeitnow: true
+
+  remotive:
+    # NOTE: Remotive's public API ignores both `search` and `limit` — every
+    # query returns the same 16 postings (measured 2026-08-17). Targeted terms
+    # here would be 10 identical HTTP calls, so the list stays empty.
+    search_terms: []
+
+  jobicy:
+    # Global feed plus per-region, so one region cannot crowd out another.
+    geos: [usa, united-kingdom, india, canada, europe, asia, australia]
+
+  himalayas:               # worldwide remote board, includes salary data
+    max_jobs: 400
+
+  weworkremotely:
+    categories:
+      - remote-programming-jobs
+      - remote-devops-sysadmin-jobs
+      - remote-product-jobs
+
+  # Small curated board, ~40 postings, no pagination. Measured yield for this
+  # profile is near zero - mostly generic dev work locked to the EU or North
+  # America. One cheap request, so it stays; drop it if it stays at zero.
+  workingnomads: true
+
+  # Singapore's official government job board (Workforce Singapore). Public
+  # API, no key. The only SG source that reports salary, which is what decides
+  # Employment Pass eligibility - every posting is annotated with whether it
+  # clears MOM's floor. Keep ep_min_monthly_sgd in step with profile.yaml.
+  mycareersfuture:
+    ep_min_monthly_sgd: 5600
+    per_term: 30
+    fetch_descriptions: true
+    terms:
+      - QA engineer
+      - QA automation engineer
+      - SDET
+      - software test engineer
+      - test automation engineer
+      - quality assurance engineer
+      - performance test engineer
+      - AI quality engineer
+      - LLM evaluation engineer
+
+  mailbox:
+    # THE ONLY LEGITIMATE ROUTE TO NAUKRI / LINKEDIN / INDEED / INSTAHYRE.
+    # Those portals have no public API and prohibit scraping, but they will
+    # email you saved-search alerts. Reading your own inbox breaks no terms
+    # and cannot get an account banned.
+    #
+    #   1. Create daily job alerts on each portal (QA Engineer Hyderabad, etc.)
+    #   2. Create an APP PASSWORD for your mail account. Never the real one.
+    #      Gmail: Google Account -> Security -> 2-Step -> App passwords
+    #   3. setx JOBAGENT_MAIL_PASSWORD "the-app-password"   (restart the shell)
+    #   4. Set enabled: true and your address below
+    #   5. Check it before trusting it:  python run.py mailbox-test
+    #
+    # The mailbox is opened READ-ONLY: nothing is marked read, moved or deleted.
+    enabled: false                # flip to true once you've set the app password below
+    host: imap.gmail.com
+    port: 993
+    user: "your-address@gmail.com"
+    password_env: JOBAGENT_MAIL_PASSWORD
+    folder: INBOX                 # or a filtered folder, e.g. "JobAlerts"
+    max_age_days: 14
+    max_messages: 400
+
+  adzuna:
+    # Free key, 2 minutes, no card: https://developer.adzuna.com/
+    # Then copy Application ID + Application Key from
+    #   https://developer.adzuna.com/admin/access_details
+    #
+    # Adzuna is SEARCH-driven — there is no "everything" endpoint, so the
+    # terms below are the coverage. `where` narrows to a city, which is how
+    # Hyderabad onsite roles get found at all.
+    enabled: false
+    app_id: ""
+    app_key: ""
+
+    countries: [in, us, gb, ae, sg, ca, au]
+
+    search_terms:
+      - qa engineer
+      - qa automation engineer
+      - sdet
+      - software test engineer
+      - test automation engineer
+      - quality assurance engineer
+      - automation testing
+      - selenium tester
+      - api testing
+      - ai qa engineer
+
+    # Cities to search per country. India first: this is the Hyderabad route.
+    where:
+      in: ["Hyderabad", "Bengaluru", ""]
+      us: [""]
+      gb: [""]
+      ae: [""]
+      sg: [""]
+      ca: [""]
+      au: [""]
+
+    results_per_page: 50
+    pages: 2                  # 2 x 50 per term x city
+    max_days_old: 7
+
+# Company/contact discovery beyond the ATS boards and feeds above. Added
+# 2026-09-08 alongside jobagent/enrich/. Both keep to real free tiers
+# (checked that date) — see SETUP.md for signup links and current pricing.
+enrichment:
+  exa:
+    # Company/job/professional-profile discovery via neural search.
+    # https://exa.ai -> dashboard -> API key. Free tier: $20 signup credit +
+    # $10/month recurring, no card (checked 2026-09-08, exa.ai/pricing).
+    enabled: true
+    api_key_env: EXA_API_KEY
+
+  firecrawl:
+    # Extraction of public websites/job descriptions into clean markdown,
+    # including JS-rendered pages a plain HTTP GET can't read (e.g. YC
+    # company pages, which are blocked entirely in some sandboxed
+    # environments but reachable here).
+    # https://firecrawl.dev -> dashboard -> API key. Free tier: 1,000
+    # credits/month, no card (checked 2026-09-08).
+    enabled: true
+    api_key_env: FIRECRAWL_API_KEY
+
+  browserbase:
+    # Hosted browser sessions. OFF by default - nothing in this pipeline
+    # currently needs interactive browser automation (ATS/aggregator data
+    # comes from public JSON APIs; LinkedIn/Naukri are deliberately read via
+    # mailbox alerts, not a browser, to avoid unauthorized-scraping
+    # exposure - see jobagent/sources/mailbox.py). Turn on only if a
+    # concrete task actually needs it.
+    enabled: false
+    api_key_env: BROWSERBASE_API_KEY
+
+# Outbound email. Draft-only by default and for the foreseeable future — see
+# jobagent/outreach/gmail.py. There is no sending policy implemented yet
+# (recipient confidence checks, suppression list, dedup ledger), so no send
+# function exists to enable even if you flip this on. Setup: Google Cloud
+# Console -> enable Gmail API -> OAuth 2.0 Client ID (Desktop app) ->
+# download as credentials.json in the project root. First run opens a
+# browser for one-time consent.
+outreach:
+  gmail:
+    enabled: true
+    credentials_path: credentials.json
+    token_path: token.json
+    mode: draft_only          # the only mode that exists right now

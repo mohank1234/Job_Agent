@@ -241,6 +241,53 @@ activity + funding/stability signal + a reachable decision-maker. Belonging
 to YC/Sequoia/a16z/etc. is a discovery filter that surfaces candidates, not
 a qualifying signal that promotes one on its own.
 
+## Enrichment and outreach adapters (2026-09-08)
+
+`jobagent/enrich/` (Exa, Firecrawl) and `jobagent/outreach/gmail.py` were
+added to support the strategy above with real tools instead of hand-research
+every time. All three are live-verified — `python run.py check-setup`
+checks each with a real minimal request, not a config-presence check.
+
+**Exa** (`jobagent/enrich/exa.py`) — neural search for companies, jobs, and
+professional profiles. Get a key at [exa.ai](https://exa.ai) (dashboard ->
+API key). Free tier checked 2026-09-08: $20 signup credit + $10/month
+recurring, no card. `setx EXA_API_KEY "..."`.
+
+**Firecrawl** (`jobagent/enrich/firecrawl.py`) — turns a URL into clean
+markdown, including JS-rendered pages a plain HTTP GET can't read (verified
+live against `ycombinator.com/companies/...` pages, which are blocked
+entirely in some sandboxed environments but reachable from here). Get a key
+at [firecrawl.dev](https://firecrawl.dev). Free tier checked 2026-09-08:
+1,000 credits/month, no card. `setx FIRECRAWL_API_KEY "..."`.
+
+Both raise a typed `AdapterError` (`jobagent/enrich/_errors.py`) with a
+`.kind` — `unauthorized` / `forbidden` / `rate_limited` / `server_error` /
+`timeout` / `connection_error` / `invalid_response` — instead of collapsing
+every failure into "no results," so a bad key never looks like an empty
+search.
+
+**Gmail** (`jobagent/outreach/gmail.py`) — draft creation only. There is no
+send function: sending needs a real policy (recipient confidence,
+suppression list, dedup ledger) that doesn't exist yet, so the adapter
+stops at "create a reviewable draft."
+
+1. Google Cloud Console -> enable the Gmail API -> OAuth 2.0 Client ID
+   (Desktop app) -> download JSON, save as `credentials.json` in the
+   project root (gitignored).
+2. Run `python run.py gmail-auth` yourself, in your own terminal — it opens
+   a real browser and needs you to click Allow. This can't be automated and
+   shouldn't be: it's you granting access to your own Gmail account.
+3. `token.json` (also gitignored) is written after that and refreshes
+   itself; delete it to force re-authorization.
+
+**Not built:** Hunter and Apollo — checked 2026-09-08, their free tiers
+don't include API access (Hunter: Growth tier, $149/mo; Apollo: Organization
+tier, $119+/user/month, 3-user minimum). Browserbase — key is configured
+(`BROWSERBASE_API_KEY`) but no adapter exists; nothing in this pipeline
+currently needs interactive browser automation. Google Antigravity — not
+integrable here at all; it's an IDE/agent product, not an API a standalone
+Python script can call.
+
 ## Runs by itself
 
 | Task | Time | Does |
@@ -473,5 +520,8 @@ only that label. Faster, and it never touches the rest of your mail.
 | Your email address | you | `config.yaml` -> `mailbox.user` |
 | Daily job alerts | Naukri / LinkedIn / Indeed / Instahyre / Hirist / Foundit | your inbox |
 
-No other keys, accounts or payments are needed. The LLM scoring runs on free
-local models through OmniRoute and costs nothing.
+No other keys, accounts or payments are needed beyond the free `GEMINI_API_KEY`
+above. The LLM scoring runs on Gemini's free tier — OmniRoute (mentioned
+earlier in this doc) was removed on 2026-08-20 and nothing launches it; this
+line used to still credit it, which was itself the kind of doc/code
+divergence flagged in the 2026-09-07 repo audit (finding #15) — fixed here.

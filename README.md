@@ -13,8 +13,12 @@ sources -> normalize -> dedupe -> STORE ALL -> role classification ->
 candidate detection -> profile matching (LLM) -> score -> rank -> digest
 ```
 
-**No job is ever deleted.** Postings that do not fit are stored with match
-category D (low) or E (not relevant) and stay in `jobs.db` forever.
+**By default, no job is ever deleted.** Postings that do not fit are stored
+with match category D (low) or E (not relevant) and stay in `jobs.db`. This
+is controlled by `retention.prune_non_matching` in `config.yaml` (off by
+default) — turning it on does delete D/E rows, leaving a small tombstone so
+they aren't re-fetched. Leave it off unless you deliberately want a lossy
+database.
 
 ## Why it hits company ATS boards
 
@@ -37,21 +41,19 @@ coverage there.
 
 ```bash
 pip install -r requirements.txt
+cp config.yaml.example config.yaml     # then edit it — see below
+cp profile.yaml.example profile.yaml   # then fill in your real profile
 ```
 
-Matching runs through a **local OmniRoute gateway on free models** - no API
-key, no cost.
-
-OmniRoute starts with Windows via the Startup-folder shortcut and self-heals
-through `Health-Check.ps1`, so there is nothing to configure per run.
-
-```
-Job Agent -> http://localhost:20128/v1 -> free model
-Dashboard:   http://localhost:20128
-```
-
-`llm.provider: omnirate` in `config.yaml` selects it. The `anthropic` and
-`openrouter` providers still exist but are paid and off by default.
+Matching runs through **Gemini's free tier** — no card, no local gateway to
+run. `llm.provider: gemini` in `config.yaml` selects it, with `groq` and the
+now-removed `omnirate` (a local OmniRoute gateway, used until 2026-08-20) as
+the fallback chain's other free-tier options. The `anthropic` and
+`openrouter` providers still exist in `jobagent/llm.py` but are paid and off
+by default. Get a Gemini key in 60 seconds at
+https://aistudio.google.com/apikey, then
+`setx GEMINI_API_KEY "your-key"` (reopen the terminal afterward). See
+`config.yaml.example`'s `llm:` block for the full provider/model rationale.
 
 ## Usage
 

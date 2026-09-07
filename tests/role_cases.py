@@ -370,7 +370,13 @@ SG_INDUSTRIAL_DESC = (
 # (title, description, workplace, expected singapore_eligibility verdict,
 #  should it survive the QA-only + location scope cap)
 SG_CASES: list[tuple[str, str, str, str, bool]] = [
-    ("Senior Test Automation Engineer", SG_SPONSOR_DESC,  "onsite", "sponsors",    True),
+    # SG_SPONSOR_DESC only meets the salary floor - it contains no explicit
+    # sponsorship-intent language, so it must NOT verdict the same as actual
+    # "we sponsor" language (repo audit 2026-09-07 finding #17: compensation
+    # and sponsorship-intent are distinct signals and must not collapse into
+    # one verdict). Still uncapped/survives - salary being real is legally
+    # necessary and worth pursuing, just not the same claim as "sponsors".
+    ("Senior Test Automation Engineer", SG_SPONSOR_DESC,  "onsite", "salary_meets_floor", True),
     ("QA Automation Engineer",          SG_EXPLICIT_DESC, "onsite", "sponsors",    True),
     ("SDET",                            SG_BELOW_DESC,    "onsite", "below_floor", False),
     ("QA Engineer",                     SG_LOCALS_DESC,   "onsite", "locals_only", False),

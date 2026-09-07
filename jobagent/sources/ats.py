@@ -69,6 +69,19 @@ def _lever_parse(slug: str, data: list) -> list[Job]:
         cats = j.get("categories") or {}
         loc = cats.get("location", "") or ""
         desc = clean_html(j.get("descriptionPlain") or j.get("description", ""))
+        # Lever's "lists" array carries the responsibilities/requirements
+        # sections separately from `description` — dropping it (as this
+        # parser used to) discarded the bulk of the posting's substantive
+        # content (repo audit 2026-09-07 finding #5: ~4x more content lived
+        # here than in `descriptionPlain` on a live board checked that day).
+        for section in j.get("lists") or []:
+            heading = clean_html(section.get("text", ""))
+            body = clean_html(section.get("content", ""))
+            if body:
+                desc += f"\n\n{heading}\n{body}" if heading else f"\n\n{body}"
+        additional = clean_html(j.get("additionalPlain") or j.get("additional", ""))
+        if additional:
+            desc += f"\n\n{additional}"
         jobs.append(
             Job(
                 source="lever",
@@ -120,8 +133,15 @@ def _ashby_parse(slug: str, data: dict) -> list[Job]:
     return jobs
 
 
-def _smartrecruiters_url(slug: str) -> str:
-    return f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=100"
+SMARTRECRUITERS_PAGE = 100
+SMARTRECRUITERS_MAX_PAGES = 20   # 2,000 postings is far past any board we track
+
+
+def _smartrecruiters_url(slug: str, offset: int = 0) -> str:
+    return (
+        f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+        f"?limit={SMARTRECRUITERS_PAGE}&offset={offset}"
+    )
 
 
 def _smartrecruiters_parse(slug: str, data: dict) -> list[Job]:
@@ -185,9 +205,38 @@ ADAPTERS = {
     "greenhouse": (_greenhouse_url, _greenhouse_parse),
     "lever": (_lever_url, _lever_parse),
     "ashby": (_ashby_url, _ashby_parse),
-    "smartrecruiters": (_smartrecruiters_url, _smartrecruiters_parse),
     "workable": (_workable_url, _workable_parse),
 }
+
+
+async def _smartrecruiters_fetch(
+    client: httpx.AsyncClient, vendor: str, slug: str
+) -> tuple[str, str, list[Job], str | None]:
+    """Paginated — a plain single GET (the old `_smartrecruiters_url`/ADAPTERS
+    path) silently truncated any board past its first 100 postings (repo
+    audit 2026-09-07 finding #7: live-confirmed on Canva and ServiceNow, both
+    landing exactly on the 100-record cap)."""
+    jobs: list[Job] = []
+    try:
+        for page in range(SMARTRECRUITERS_MAX_PAGES):
+            offset = page * SMARTRECRUITERS_PAGE
+            resp = await client.get(
+                _smartrecruiters_url(slug, offset), headers=UA, timeout=TIMEOUT
+            )
+            if resp.status_code == 404:
+                return vendor, slug, jobs, "404 — slug not found on this vendor"
+            resp.raise_for_status()
+            data = resp.json()
+            batch = _smartrecruiters_parse(slug, data)
+            jobs.extend(batch)
+            total = data.get("totalFound") or 0
+            if len(batch) < SMARTRECRUITERS_PAGE or len(jobs) >= total:
+                break
+    except httpx.HTTPStatusError as exc:
+        return vendor, slug, jobs, f"HTTP {exc.response.status_code}"
+    except (httpx.HTTPError, ValueError) as exc:
+        return vendor, slug, jobs, f"{type(exc).__name__}: {exc}"
+    return vendor, slug, jobs, None
 
 
 # --- Workday ---------------------------------------------------------------
@@ -216,6 +265,10 @@ def _workday_parse(slug: str, data: dict) -> list[Job]:
     for j in data.get("jobPostings", []):
         loc = j.get("locationsText", "") or ""
         path = j.get("externalPath", "") or ""
+        # Placeholder until _workday_fetch_detail fills in the real
+        # description — bulletFields is typically a handful of short
+        # highlights (repo audit 2026-09-07 finding #6: measured as low as
+        # 8 characters on a live board, vs. 6,000+ from the detail page).
         desc = clean_html(j.get("bulletFields") and " ".join(j["bulletFields"]) or "")
         jobs.append(
             Job(
@@ -227,10 +280,40 @@ def _workday_parse(slug: str, data: dict) -> list[Job]:
                 workplace=infer_workplace(loc, "", desc[:600]),
                 description=desc,
                 posted_at=_parse_date(j.get("postedOn")),
-                raw=j,
+                raw={**j, "_workday_detail_path": path},
             )
         )
     return jobs
+
+
+async def _workday_fetch_detail(
+    client: httpx.AsyncClient, tenant: str, wd: str, site: str, job: Job
+) -> None:
+    """Fill `job.description` from the per-posting detail endpoint.
+
+    The listing endpoint (`_workday_parse`) only ever returns `bulletFields`
+    — a handful of short highlights, not the actual job description. This
+    was measured at 8 characters on a live BrowserStack posting during the
+    2026-09-07 repo audit (finding #6), against 6,794 characters of real
+    HTML description available one request away at this detail endpoint.
+    Failures here are non-fatal: the job keeps its bulletFields snippet
+    rather than losing the posting entirely.
+    """
+    path = job.raw.get("_workday_detail_path") if isinstance(job.raw, dict) else None
+    if not path:
+        return
+    url = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}{path}"
+    try:
+        resp = await client.get(url, headers={**UA, "Accept": "application/json"},
+                                 timeout=TIMEOUT)
+        resp.raise_for_status()
+        info = resp.json().get("jobPostingInfo") or {}
+        full_desc = clean_html(info.get("jobDescription", ""))
+        if full_desc:
+            job.description = full_desc
+            job.workplace = infer_workplace(job.location, "", full_desc[:600])
+    except (httpx.HTTPError, ValueError):
+        pass   # keep the bulletFields snippet already set by _workday_parse
 
 
 async def _workday_fetch(
@@ -266,11 +349,24 @@ async def _workday_fetch(
         return vendor, slug, jobs, f"HTTP {exc.response.status_code}"
     except (httpx.HTTPError, ValueError) as exc:
         return vendor, slug, jobs, f"{type(exc).__name__}: {exc}"
+
+    # Full-detail pass, bounded concurrency so a large board doesn't fire
+    # dozens of simultaneous requests at one tenant.
+    detail_sem = asyncio.Semaphore(4)
+
+    async def _fill(job: Job) -> None:
+        async with detail_sem:
+            await _workday_fetch_detail(client, tenant, wd, site, job)
+
+    await asyncio.gather(*(_fill(j) for j in jobs))
+    for j in jobs:
+        if isinstance(j.raw, dict):
+            j.raw.pop("_workday_detail_path", None)
     return vendor, slug, jobs, None
 
 
 # Vendors whose board needs more than a single plain GET.
-CUSTOM_FETCHERS = {"workday": _workday_fetch}
+CUSTOM_FETCHERS = {"workday": _workday_fetch, "smartrecruiters": _smartrecruiters_fetch}
 
 
 async def _fetch_board(
@@ -308,13 +404,22 @@ async def _gather(boards: dict[str, list[str]], concurrency: int = 12):
         return await asyncio.gather(*tasks)
 
 
-def fetch_ats(boards: dict[str, list[str]]) -> list[Job]:
-    """Fetch every configured company board concurrently. Failures are skipped."""
+def fetch_ats(boards: dict[str, list[str]]) -> tuple[list[Job], list[str]]:
+    """Fetch every configured company board concurrently.
+
+    Returns (jobs, errors). A failed board used to be indistinguishable from
+    a board with zero open roles today — the error was bound and discarded
+    (repo audit 2026-09-07 finding #1). Callers that only want the jobs and
+    are fine losing per-board diagnostics can do `jobs, _ = fetch_ats(...)`.
+    """
     results = asyncio.run(_gather(boards))
     jobs: list[Job] = []
-    for _vendor, _slug, board_jobs, _err in results:
+    errors: list[str] = []
+    for vendor, slug, board_jobs, err in results:
         jobs.extend(board_jobs)
-    return jobs
+        if err:
+            errors.append(f"ATS {vendor}/{slug}: {err}")
+    return jobs, errors
 
 
 def verify_boards(boards: dict[str, list[str]]) -> list[tuple[str, str, int, str | None]]:

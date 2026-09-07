@@ -622,11 +622,23 @@ def singapore_eligibility(job: Job, profile: Profile) -> tuple[str, str | None]:
     """Can this Singapore role actually be taken by someone needing a visa?
 
     Returns one of:
-      n/a          not a Singapore posting
-      sponsors     says so, or pays at/above the Employment Pass floor
-      locals_only  explicitly excludes anyone needing sponsorship
-      below_floor  pays under the EP floor, so an EP cannot be granted
-      unspecified  Singapore, but silent on work authorisation
+      n/a                 not a Singapore posting
+      sponsors            explicit sponsorship-intent language found
+      salary_meets_floor  pays at/above the EP floor, but no explicit
+                           sponsorship language — financially eligible,
+                           intent unconfirmed (see note below)
+      locals_only         explicitly excludes anyone needing sponsorship
+      below_floor         pays under the EP floor, so an EP cannot be granted
+      unspecified         Singapore, but silent on both salary and sponsorship
+
+    Compensation and sponsorship-intent are two distinct real-world signals —
+    a company can pay well above the floor and still only hire locals, or
+    simply not have decided. Before this fix (repo audit 2026-09-07 finding
+    #17), meeting the salary floor alone returned "sponsors", which then
+    scored identically to an employer that had actually said it would
+    sponsor. `salary_meets_floor` keeps that distinction visible downstream
+    instead of silently upgrading a compensation fact into a confirmed
+    sponsorship claim.
     """
     blob = f"{job.location or ''} {job.company or ''}".lower()
     text = (job.description or "")[:EVIDENCE_SCAN_CHARS]
@@ -639,6 +651,12 @@ def singapore_eligibility(job: Job, profile: Profile) -> tuple[str, str | None]:
             "you would need an Employment Pass"
         )
 
+    # Explicit sponsorship-intent language is checked FIRST and independently
+    # of salary — a posting can state both, and the explicit statement is the
+    # stronger signal either way.
+    if RE_SG_SPONSORS.search(text):
+        return "sponsors", None
+
     m = RE_SG_SALARY_FLOOR.search(text)
     if m:
         if m.group(1).lower() == "below":
@@ -647,10 +665,14 @@ def singapore_eligibility(job: Job, profile: Profile) -> tuple[str, str | None]:
                 f"S${profile.ep_min_monthly_sgd:,.0f}/month, so no employer "
                 f"can sponsor this one"
             )
-        return "sponsors", None
+        return "salary_meets_floor", (
+            f"Singapore salary meets the Employment Pass floor of "
+            f"S${profile.ep_min_monthly_sgd:,.0f}/month, so sponsorship is "
+            f"legally possible - but nothing in the posting says the "
+            f"employer will actually sponsor. Confirm intent before "
+            f"investing time."
+        )
 
-    if RE_SG_SPONSORS.search(text):
-        return "sponsors", None
     return "unspecified", (
         "Singapore role that does not say whether it sponsors an Employment "
         "Pass - worth one email before you invest time in applying"
@@ -694,6 +716,8 @@ def _location_delta(job: Job, profile: Profile) -> tuple[float, str | None]:
         verdict, note = singapore_eligibility(job, profile)
         if verdict == "sponsors":
             return 7.0, None
+        if verdict == "salary_meets_floor":
+            return 4.0, note   # financially eligible, intent unconfirmed
         if verdict == "locals_only":
             return -30.0, note
         if verdict == "below_floor":
@@ -885,12 +909,14 @@ def scope_cap(job: Job, profile: Profile, qa_only: bool = True) -> tuple[int, st
             if any(city in blob for city in group):
                 return 100, None
 
-        # Singapore clears the cap only when sponsorship is actually possible.
-        # "unspecified" is left uncapped on purpose: it is worth one email to
-        # find out, and capping it would hide the role entirely.
+        # Singapore clears the cap only when sponsorship is actually possible,
+        # or worth a confirming email. "unspecified" and "salary_meets_floor"
+        # are left uncapped on purpose — capping either would hide a role
+        # that is still worth one email to confirm, but neither is treated
+        # as a confirmed "sponsors" (see singapore_eligibility docstring).
         if "singapore" in profile.onsite_countries:
             verdict, note = singapore_eligibility(job, profile)
-            if verdict in ("sponsors", "unspecified"):
+            if verdict in ("sponsors", "unspecified", "salary_meets_floor"):
                 return 100, None
             if verdict in ("locals_only", "below_floor"):
                 return OUT_OF_SCOPE_CAP, note
