@@ -1,0 +1,24 @@
+# Personal / PII - never commit. Your real career profile, resume, generated
+# per-job application kits, and researched third-party contact info.
+profile.yaml
+resume/
+applications/
+outreach_targets.yaml
+
+# Local runtime config - contains your real mailbox address (config.yaml.example
+# would be the place for a redacted template if one gets added later).
+config.yaml
+
+# Generated / derived data - large, regenerable, not meant for version control.
+jobs.db
+digest_*.md
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.DS_Store
