@@ -18,10 +18,9 @@ Pipeline:
     role classification -> candidate detection -> profile matching (LLM) ->
     rank -> prune -> digest
 
-Only postings inside `retention.max_age_days` are considered. After matching,
-jobs that do not fit (category D/E) and jobs that have gone stale are deleted,
-leaving a small tombstone (fingerprint + content hash + category) so they are
-never re-fetched into the working set or re-scored by the LLM.
+All fetched postings are stored. digest.max_age_days limits displayed and
+LLM-scored jobs. Deletion occurs only when retention.prune_non_matching is
+explicitly enabled; unchanged tombstones then avoid repeated scoring.
 """
 
 from __future__ import annotations
@@ -47,6 +46,7 @@ from jobagent.sources import fetch_ats, fetch_feeds, verify_boards
 from jobagent.store import Store, row_to_job
 
 ROOT = Path(__file__).parent
+RUN_DETAILS: dict = {}
 
 # Windows consoles still default to cp1252, which cannot encode the spinner and
 # bullet glyphs rich emits — that crashes the run mid-fetch. Force UTF-8.
@@ -91,20 +91,22 @@ def collect(config: dict) -> tuple[list[Job], list[str], dict]:
     sources = config.get("sources", {})
     notes: list[str] = []
     jobs: list[Job] = []
-    counts = {"ats": 0, "aggregator": 0}
+    counts = {"ats": 0, "aggregator": 0, "sources": []}
 
     if sources.get("ats", True):
         boards = load_yaml("companies.yaml")
         with console.status("Fetching company ATS boards..."):
-            ats_jobs, ats_errors = fetch_ats(boards)
+            ats_jobs, ats_errors = fetch_ats(boards, outcomes=counts["sources"])
         counts["ats"] = len(ats_jobs)
         console.print(f"  ATS boards       : {len(ats_jobs)} postings"
                        + (f" ({len(ats_errors)} boards failed)" if ats_errors else ""))
         jobs += ats_jobs
         notes += ats_errors
+    else:
+        counts["sources"].append({"source": "ats", "status": "disabled", "fetched": 0})
 
     with console.status("Fetching aggregator feeds..."):
-        feed_jobs, feed_errors = fetch_feeds(sources)
+        feed_jobs, feed_errors = fetch_feeds(sources, outcomes=counts["sources"])
     counts["aggregator"] = len(feed_jobs)
     console.print(f"  Aggregator feeds : {len(feed_jobs)} postings")
     jobs += feed_jobs
@@ -162,7 +164,7 @@ def cmd_fetch(args) -> None:
     # on every run. The tombstone hash includes the classification AND the
     # matching policy, so a job DOES come back for reconsideration if the
     # classifier, the posting, or the profile/prompt/model changes.
-    tombstones = store.dismissed_hashes()
+    tombstones = store.dismissed_hashes() if retention.get("prune_non_matching", False) else {}
     if tombstones:
         kept = [j for j in jobs if tombstones.get(j.fingerprint) != j.content_hash(pv)]
         skipped = len(jobs) - len(kept)
@@ -210,12 +212,14 @@ def cmd_fetch(args) -> None:
 
     scored_counts = {"cached": 0, "llm": 0, "fallback": 0}
     if args.no_llm:
-        console.print("[yellow]--no-llm: keeping deterministic scores only.[/yellow]\n")
-        for job in cands:
-            store.record_match(job)
+        console.print("[yellow]--no-llm: stored rules scores; unchanged LLM verdicts retained.[/yellow]\n")
     else:
-        cap = args.limit or int(llm_cfg.get("max_jobs_per_run", 60))
-        todo = cands[:cap]
+        cap = args.limit if args.limit is not None else int(llm_cfg.get("max_jobs_per_run", 60))
+        if cap < 0:
+            raise ValueError("--limit must be non-negative")
+        pending = [job for job in cands if not store.apply_cached(job, pv)]
+        cached_count = len(cands) - len(pending)
+        todo = pending[:cap]
         console.print(
             f"[bold]4. Matching against profile[/bold] — {len(todo)} of "
             f"{len(cands)} candidates via {llm_cfg.get('provider')} / "
@@ -228,8 +232,8 @@ def cmd_fetch(args) -> None:
             )
         # Candidates the LLM will not reach this run still need their
         # deterministic verdict persisted.
-        for job in cands[len(todo):]:
-            store.record_match(job)
+        # upsert_all already persisted rules for deferred jobs and preserved
+        # unchanged LLM verdicts. Do not overwrite those with rules here.
 
         with console.status("Matching...") as status:
             def progress(done, total):
@@ -238,6 +242,7 @@ def cmd_fetch(args) -> None:
                 todo, profile, llm_cfg, store=store, on_progress=progress
             )
         notes += errors
+        scored_counts["cached"] += cached_count
         console.print(
             f"  LLM-scored {scored_counts['llm']} · cached {scored_counts['cached']} "
             f"· rules fallback {scored_counts['fallback']}\n"
@@ -264,11 +269,14 @@ def cmd_fetch(args) -> None:
         "new": new_count,
         "candidates": len(cands),
         "pruned": pruned.get("total"),
-        "window_days": max_age,
+        "window_days": digest_window,
         **scored_counts,
     }, max_age_days=digest_window,
        only_new=config.get("digest", {}).get("only_new", True))
     store.close()
+
+    RUN_DETAILS.update(sources=counts.get("sources", []), notes=notes, scoring=scored_counts)
+    return 2 if notes else 0
 
 
 def _write_digest(store: Store, notes, new_fps, extra_stats, max_age_days=None,
@@ -283,18 +291,12 @@ def _write_digest(store: Store, notes, new_fps, extra_stats, max_age_days=None,
     """
     stats = store.stats()
     stats.update(extra_stats)
-    rows = store.top(limit=120, categories=("A", "B", "C"), only_new=only_new)
+    stats["window_days"] = max_age_days
+    rows = store.top(limit=60, categories=("A", "B", "C"), only_new=only_new,
+                     max_age_days=max_age_days)
     jobs = [row_to_job(r) for r in rows]
 
-    # Age only gates the DIGEST. Every job stays in the database.
-    if max_age_days:
-        keep = [
-            (r, j) for r, j in zip(rows, jobs)
-            if j.age_days is None or j.age_days <= max_age_days
-        ]
-        rows = [r for r, _ in keep]
-        jobs = [j for _, j in keep]
-    rows, jobs = rows[:60], jobs[:60]
+    # Store.top applies the age window before taking the display quota.
 
     fingerprints = {r["fingerprint"] for r in rows if r["fingerprint"] in new_fps}
 
@@ -331,14 +333,20 @@ def cmd_score(args) -> None:
     profile = load_profile(ROOT / config.get("profile_file", "profile.yaml"))
     store = Store(ROOT / "jobs.db")
 
-    cap = args.limit or int(llm_cfg.get("max_jobs_per_run", 60))
-    rows = store.unscored_candidates(limit=cap)
-    if not rows:
-        console.print("[green]Every stored candidate already has an LLM verdict.[/green]")
+    from jobagent.selection import pending_jobs
+    cap = args.limit if args.limit is not None else int(llm_cfg.get("max_jobs_per_run", 60))
+    if cap < 0:
+        raise ValueError("--limit must be non-negative")
+    jobs = pending_jobs(store.conn.execute("SELECT * FROM seen").fetchall(), profile, llm_cfg,
+                        config.get("digest", {}).get("max_age_days"), store=store)[:cap]
+    if not jobs:
+        console.print("No eligible fresh candidates need scoring within this run's limit.")
         store.close()
         return
 
-    jobs = [row_to_job(r) for r in rows]
+    pv = policy_version(profile, llm_cfg)
+    for job in jobs:
+        store.record_evaluation(job, pv)
     console.print(f"[bold]Resuming[/bold]: {len(jobs)} candidates still unscored")
     with console.status("Matching...") as status:
         def progress(done, total):
@@ -355,6 +363,9 @@ def cmd_score(args) -> None:
                   only_new=config.get("digest", {}).get("only_new", True))
     store.close()
 
+    RUN_DETAILS.update(scoring=counts, notes=errors)
+    return 2 if errors else 0
+
 
 def cmd_digest(args) -> None:
     """Rebuild today's digest from jobs.db.
@@ -367,7 +378,7 @@ def cmd_digest(args) -> None:
     store = Store(ROOT / "jobs.db")
     _write_digest(store, [], set(), {},
                   max_age_days=config.get("digest", {}).get("max_age_days"),
-                  only_new=not args.include_seen)
+                  only_new=config.get("digest", {}).get("only_new", True) and not args.include_seen)
     store.close()
 
 
@@ -444,38 +455,17 @@ def cmd_apply_kit(args) -> None:
     sys.path.insert(0, str(ROOT / "resume"))
     import tailor
 
+    config = load_yaml("config.yaml")
     store = Store(ROOT / "jobs.db")
     cats = tuple(args.categories) if args.categories else ("A", "B", "C")
-    rows = store.top(limit=args.top, categories=cats)
+    rows = store.top(limit=-1, categories=cats,
+                     max_age_days=config.get("digest", {}).get("max_age_days"))
     store.close()
-
-    if not rows:
-        console.print("[yellow]No matching jobs yet. Run `python run.py fetch`.[/yellow]")
-        return
-
-    # A kit already built on an earlier day is still valid, and rebuilding it
-    # costs an LLM call to produce the same folder again. Skip anything already
-    # on disk unless --all is passed.
     apps_root = ROOT / "applications"
-    if not args.all:
-        built = {
-            d.name
-            for day in apps_root.glob("*")
-            if day.is_dir()
-            for d in day.glob("*")
-            if d.is_dir()
-        }
-        fresh = [r for r in rows if tailor.kit_slug(r["company"], r["title"]) not in built]
-        skipped = len(rows) - len(fresh)
-        rows = fresh
-        if skipped:
-            console.print(
-                f"[dim]{skipped} job(s) already have a kit from an earlier day - "
-                f"skipping. Use --all to rebuild them.[/dim]"
-            )
-        if not rows:
-            console.print("[yellow]No new jobs to build kits for.[/yellow]")
-            return
+    rows = tailor.select_kits(rows, apps_root, args.top, rebuild=args.all)
+    if not rows:
+        console.print("No fresh matching jobs need a kit within this run's limit.")
+        return
 
     out_dir = apps_root / f"{datetime.now():%Y-%m-%d}"
     console.print(f"[bold]Building {len(rows)} application kits[/bold] -> {out_dir}\n")
@@ -499,9 +489,8 @@ def cmd_apply_kit(args) -> None:
         f"[bold]APPLICATION-NOTE.md[/bold] with the apply URL and expected gaps."
     )
     console.print(
-        "[yellow]Submitting these is manual on purpose.[/yellow] Automated "
-        "submission breaches the terms of every major job portal and ATS, and "
-        "gets accounts banned — which costs you the pipeline you just built."
+        "Kits are prepared locally. No application was submitted. "
+        "Review the live opening and any unanswered application questions."
     )
 
 
@@ -646,8 +635,8 @@ def cmd_check_setup(_args) -> None:
     browserbase_cfg = enrichment.get("browserbase") or {}
     if browserbase_cfg.get("enabled"):
         key_env = browserbase_cfg.get("api_key_env", "BROWSERBASE_API_KEY")
-        row("Browserbase (hosted browser)", bool(os.environ.get(key_env)),
-            f"{key_env} {'set' if os.environ.get(key_env) else 'not set'} — not live-checked (no adapter built, unused)")
+        row("Browserbase (hosted browser)", False,
+            f"{key_env} {'configured' if os.environ.get(key_env) else 'not set'}; session/account login not verified by this check")
     else:
         row("Browserbase (hosted browser)", False, "disabled — no current task needs it")
 
@@ -657,7 +646,7 @@ def cmd_check_setup(_args) -> None:
     if gmail_cfg.get("enabled"):
         from jobagent.outreach.gmail import CREDENTIALS_PATH, TOKEN_PATH
         if TOKEN_PATH.exists():
-            row("Gmail (draft creation)", True, f"authorized — token at {TOKEN_PATH.name}")
+            row("Gmail (draft creation)", False, "token file present; consent, scopes and account not live-verified")
         elif CREDENTIALS_PATH.exists():
             row("Gmail (draft creation)", False,
                 f"credentials.json present but not yet authorized — run once to complete OAuth consent")
@@ -671,7 +660,7 @@ def cmd_check_setup(_args) -> None:
     console.print("Verify the mailbox once configured: [bold]python run.py mailbox-test[/bold]")
 
 
-def cmd_gmail_auth(_args) -> None:
+def cmd_gmail_auth(args) -> None:
     """One-time Gmail OAuth consent. Run this yourself, interactively — it
     opens your real browser and needs you to click Allow. There is no way
     to automate that click, and there shouldn't be: it's you granting this
@@ -682,11 +671,14 @@ def cmd_gmail_auth(_args) -> None:
     console.print("[bold]Opening your browser for Gmail consent...[/bold]")
     console.print("If nothing opens, check for a popup blocker or a URL printed below to open by hand.\n")
     try:
-        creds = authenticate()
+        from jobagent.outreach.gmail import SCOPES
+        from jobagent.outreach.outcomes import READ_SCOPE
+        scopes = SCOPES + ([READ_SCOPE] if args.track_replies else [])
+        creds = authenticate(interactive=True, required_scopes=scopes)
         sender = get_authenticated_sender(creds)
     except GmailAuthError as exc:
         console.print(f"[red]Gmail auth failed ({exc.kind}):[/red] {exc}")
-        return
+        return 1
     console.print(f"[green]Authorized.[/green] Drafts will be created as: [bold]{sender}[/bold]")
     console.print("Token saved to token.json — future runs won't re-prompt unless it's deleted or revoked.")
 
@@ -707,106 +699,119 @@ def _extract_email(email_cell: str) -> str | None:
     return m.group(0) if m else None
 
 
-def cmd_draft_outreach(args) -> None:
-    """Read the 'JobAgent Outreach Report' Sheet and create a real Gmail
-    draft for every row that has an extractable recipient email and hasn't
-    already been drafted in a previous run of this command.
-
-    DRAFT-ONLY: this never sends anything. Every draft lands in your Gmail
-    Drafts folder for you to review before sending it yourself - creating
-    a draft is not authorization to send it, and this command does not
-    send.
-    """
-    import csv
-    import io
+def cmd_draft_outreach(args) -> int:
+    """Create reviewed, evidence-backed drafts, checkpointing every recipient."""
     import json
+    from functools import partial
+    from jobagent.outreach.gmail import authenticate, create_draft, read_sheet_as_csv, get_authenticated_sender
+    from jobagent.outreach.service import parse_rows, draft_rows
 
-    from jobagent.outreach.gmail import GmailAuthError, create_draft, read_sheet_as_csv
-
-    ledger: dict = {}
-    if DRAFT_LEDGER_PATH.exists():
-        ledger = json.loads(DRAFT_LEDGER_PATH.read_text(encoding="utf-8"))
-
-    sheet_name = args.sheet or "JobAgent Outreach Report"
-    console.print(f"[bold]Reading '{sheet_name}' from Google Drive...[/bold]")
-    try:
-        csv_text = read_sheet_as_csv(sheet_name)
-    except GmailAuthError as exc:
-        console.print(f"[red]Could not read the sheet ({exc.kind}):[/red] {exc}")
-        return
-
-    rows = list(csv.DictReader(io.StringIO(csv_text)))
-    console.print(f"  {len(rows)} rows found\n")
-
-    # Dedupe by ACTUAL DESTINATION ADDRESS, not by row identity. Two
-    # different named contacts (e.g. two co-founders) can share one mailbox
-    # (team@company.com) with no personal email listed for either — sending
-    # each of them a separate draft would mean two near-identical emails
-    # landing in the same inbox. What matters for avoiding a duplicate
-    # fan-out is the destination, not how many rows happen to name a person
-    # at that destination. Pull already-used emails (per company, since the
-    # same person's personal email legitimately differs by company) from the
-    # ledger regardless of which row originally sent to it.
-    already_emailed = {
-        (v.get("company", ""), v.get("email", "")) for v in ledger.values()
-    }
-
-    created = skipped_no_email = skipped_already = skipped_no_content = 0
-    skipped_dup_recipient = 0
-    for row in rows:
-        key = f"{row.get('S.No','')}|{row.get('Company','')}|{row.get('Contact Name','')}"
-        company = row.get("Company", "")
-        if key in ledger:
-            skipped_already += 1
-            continue
-
-        email = _extract_email(row.get("Email", ""))
-        subject = (row.get("Email Subject") or "").strip()
-        body = (row.get("Email Body") or "").strip()
-
-        if not email:
-            skipped_no_email += 1
-            continue
-        if not subject or not body:
-            skipped_no_content += 1
-            continue
-        if (company, email) in already_emailed:
-            skipped_dup_recipient += 1
-            console.print(f"  [yellow]skipped[/yellow] {company} <{email}> — "
-                          f"{row.get('Contact Name','')} shares this mailbox with "
-                          f"a contact already drafted; not sending a second copy "
-                          f"to the same inbox")
-            continue
-
-        if args.dry_run:
-            console.print(f"  [dim](dry-run) would draft:[/dim] {company} <{email}> — {subject}")
-            already_emailed.add((company, email))
-            continue
-
-        try:
-            result = create_draft(to=email, subject=subject, body=body)
-            ledger[key] = {"draft_id": result["draft_id"], "email": email,
-                           "company": company, "drafted_at": _now_iso()}
-            already_emailed.add((company, email))
-            created += 1
-            console.print(f"  [green]drafted[/green] {company} <{email}> — {subject[:60]}")
-        except GmailAuthError as exc:
-            console.print(f"  [red]failed[/red] {company} <{email}>: [{exc.kind}] {exc}")
-
+    config = load_yaml("config.yaml")
+    cfg = config.get("outreach", {}).get("gmail", {})
+    if not cfg.get("enabled"):
+        raise ValueError("outreach.gmail.enabled is false")
+    if args.csv:
+        csv_text = Path(args.csv).read_text(encoding="utf-8-sig")
+    else:
+        file_id = args.sheet_id or cfg.get("sheet_id")
+        if not file_id and not args.sheet:
+            raise ValueError("Set outreach.gmail.sheet_id or pass --csv / --sheet-id")
+        csv_text = read_sheet_as_csv(args.sheet, file_id=file_id)
+    rows = parse_rows(csv_text)
+    # Preflight account before reserving any recipient or attempting creation.
+    create = None
     if not args.dry_run:
-        DRAFT_LEDGER_PATH.write_text(json.dumps(ledger, indent=2), encoding="utf-8")
-
-    console.print(f"\n[bold]{created} drafts created[/bold]" + (" (dry run, none actually created)" if args.dry_run else ""))
-    console.print(f"  {skipped_already} already drafted in a previous run")
-    console.print(f"  {skipped_dup_recipient} skipped — same company+mailbox as a contact already drafted this run")
-    console.print(f"  {skipped_no_email} skipped — no email in the Email column (LinkedIn-only contacts)")
-    console.print(f"  {skipped_no_content} skipped — missing subject or body")
-    console.print("\nAll drafts are in your Gmail Drafts folder. Nothing was sent.")
-
-
+        expected = cfg.get("expected_sender")
+        if not expected:
+            raise ValueError("Set outreach.gmail.expected_sender to the account you intend to use")
+        creds = authenticate()
+        if get_authenticated_sender(creds).casefold() != expected.casefold():
+            raise ValueError("Wrong authenticated Gmail account; no drafts created")
+        create = partial(create_draft, creds=creds, expected_sender=expected)
+    result = draft_rows(rows, DRAFT_LEDGER_PATH, create, dry_run=args.dry_run, limit=args.limit)
+    console.print(json.dumps(result, indent=2))
+    console.print("Drafts only. No email was sent by this command.")
+    if result["uncertain"]:
+        console.print("An API outcome is uncertain. Inspect Gmail and the ledger before any retry.")
+    invalid = sum(n for reason, n in result["skipped"].items()
+                  if reason not in ("already_reserved_or_drafted", "over_limit"))
+    return 2 if result["uncertain"] or invalid else 0
 def _now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+def cmd_verify_outreach(args):
+    import csv
+    import io
+    import httpx
+    from collections import Counter
+    from jobagent.outreach.gmail import read_sheet_as_csv
+    from jobagent.outreach.verification import verify_row, csv_text, evidence_markdown
+    from jobagent.runtime import atomic_json, now_iso
+
+    config = load_yaml("config.yaml")
+    profile = load_profile(ROOT / config.get("profile_file", "profile.yaml"))
+    if args.csv:
+        source = Path(args.csv).read_text(encoding="utf-8-sig")
+    else:
+        source = read_sheet_as_csv(file_id=args.sheet_id)
+    reader = csv.DictReader(io.StringIO(source))
+    if not {"Company", "Job Link"}.issubset(reader.fieldnames or []):
+        raise ValueError("Input must contain Company and Job Link columns")
+    rows = list(reader)
+    if any(None in row or None in row.values() for row in rows):
+        raise ValueError("Malformed CSV row")
+    if not 1 <= args.limit <= 100:
+        raise ValueError("Verification limit must be between 1 and 100")
+    cache, verified = {}, []
+    with httpx.Client() as client:
+        for row in rows[:args.limit]:
+            result = verify_row(row, profile, client, board_cache=cache, use_firecrawl=args.firecrawl)
+            verified.append(result)
+            console.print(f"{row['Company']}: {result['JD Status']} / {result['Fit Status']}")
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "verified.csv").write_text(csv_text(verified), encoding="utf-8-sig")
+    (out / "evidence.md").write_text(evidence_markdown(verified), encoding="utf-8")
+    summary = {"checked_at": now_iso(), "input_rows": len(rows), "checked": len(verified),
+               "not_checked": max(0, len(rows) - len(verified)),
+               "statuses": dict(Counter(row["JD Status"] for row in verified))}
+    atomic_json(out / "verification.json", summary)
+    RUN_DETAILS.update(summary)
+    console.print(f"Evidence and full JDs: {out.resolve()}")
+    return 2 if summary["not_checked"] or any(row["JD Status"] in (
+        "fetch_error", "blocked", "description_missing", "unsupported_source", "ambiguous_posting") for row in verified) else 0
+
+
+def cmd_discover(args):
+    from jobagent.enrich import exa_search
+    from jobagent.outreach.verification import csv_text, board_ref
+    if not 1 <= args.limit <= 10:
+        raise ValueError("Discovery limit must be between 1 and 10")
+    results = exa_search(args.query, num_results=args.limit,
+                         include_domains=["jobs.ashbyhq.com", "jobs.lever.co", "job-boards.greenhouse.io"])
+    rows = [{"Company": board_ref(r["url"])[1] if board_ref(r["url"]) else "",
+             "Job Link": r["url"], "Discovery Title (unverified)": r["title"],
+             "JD Status": "search_result_unverified"} for r in results]
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(csv_text(rows), encoding="utf-8-sig")
+    console.print(f"{len(rows)} unverified leads saved to {out}; run verify-outreach to fetch actual postings.")
+
+
+def cmd_outreach_status(args):
+    import json
+    from jobagent.outreach.outcomes import observe
+    from jobagent.runtime import atomic_json
+    ledger = json.loads(DRAFT_LEDGER_PATH.read_text(encoding="utf-8"))
+    cfg = load_yaml("config.yaml").get("outreach", {}).get("gmail", {})
+    if not cfg.get("expected_sender"):
+        raise ValueError("Set outreach.gmail.expected_sender")
+    result = observe(ledger, cfg["expected_sender"])
+    atomic_json(Path(args.out), result)
+    console.print(f"Outcome evidence saved to {args.out}. Incoming messages still need human interpretation.")
+    return 2 if any(o["truncated"] for o in result["observations"]) else 0
 
 
 def cmd_rescore(args) -> None:
@@ -843,15 +848,14 @@ def cmd_rescore(args) -> None:
             # writes them, which is exactly repo audit finding #13: a
             # reclassification's role_family/candidate/base_score stayed
             # permanently stale in the DB even after match_category updated.
-            if job.role_family != (before_family or "") or job.candidate != before_candidate:
-                store.record_classification(job, pv)
+            if job.content_hash(pv) != row["content_hash"]:
                 reclassified += 1
 
             if job.score != before_score or job.match_category != before_cat:
                 changed += 1
                 if job.match_category in ("D", "E") and before_cat in ("A", "B", "C"):
                     demoted += 1
-                store.record_match(job)
+            store.record_evaluation(job, pv)
             if i % 500 == 0:
                 status.update(f"Re-scoring... {i}/{len(rows)}")
 
@@ -883,7 +887,7 @@ def cmd_mailbox_test(args) -> None:
     passed = sum(r["ok"] for r in results)
     console.print(f"[bold]{passed}/{len(results)}[/bold] parser cases passed\n")
     if args.offline:
-        return
+        return 0 if passed == len(results) else 1
 
     config = load_yaml("config.yaml")
     mail = (config.get("sources") or {}).get("mailbox") or {}
@@ -908,6 +912,7 @@ def cmd_mailbox_test(args) -> None:
         console.print(f"  {n:4}  {portal}")
     for j in jobs[:15]:
         console.print(f"    [dim]{j.source:16}[/dim] {j.title[:52]} — {j.company[:22]}")
+    return 1 if errors or passed != len(results) else 0
 
 
 def cmd_classify_test(_args) -> None:
@@ -974,6 +979,7 @@ def cmd_verify(_args) -> None:
     console.print(f"\n[green]{live} live[/green] · [red]{dead} broken[/red]")
     if dead:
         console.print("Remove or fix the broken slugs in companies.yaml.")
+    return 1 if dead else 0
 
 
 def cmd_tailor(args) -> None:
@@ -1065,16 +1071,37 @@ def main() -> None:
     sub.add_parser("check-setup", help="what is connected, what is missing"
                    ).set_defaults(func=cmd_check_setup)
 
-    sub.add_parser("gmail-auth", help="one-time Gmail OAuth consent (opens your browser)"
-                   ).set_defaults(func=cmd_gmail_auth)
+    auth = sub.add_parser("gmail-auth", help="one-time Gmail OAuth consent (opens your browser)")
+    auth.add_argument("--track-replies", action="store_true", help="also request read-only Gmail scope for outcome tracking")
+    auth.set_defaults(func=cmd_gmail_auth)
+    outcomes = sub.add_parser("outreach-status", help="read sent/thread evidence; requires gmail-auth --track-replies")
+    outcomes.add_argument("--out", default="research/outreach-status.json")
+    outcomes.set_defaults(func=cmd_outreach_status)
 
     draft = sub.add_parser("draft-outreach",
                            help="create Gmail drafts from the Outreach Report sheet (never sends)")
     draft.add_argument("--sheet", default=None,
-                       help="sheet name (default: 'JobAgent Outreach Report')")
+                       help="explicit legacy name lookup; multiple matches fail")
+    draft.add_argument("--sheet-id", help="fixed Google Sheet ID")
+    draft.add_argument("--csv", help="local reviewed CSV; dry-run with this option is offline")
+    draft.add_argument("--limit", type=int, default=10)
     draft.add_argument("--dry-run", action="store_true",
                        help="show what would be drafted without creating anything")
     draft.set_defaults(func=cmd_draft_outreach)
+
+    research = sub.add_parser("verify-outreach", help="verify public ATS postings and exact public contact evidence")
+    inputs = research.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--csv")
+    inputs.add_argument("--sheet-id")
+    research.add_argument("--out", default="research/latest")
+    research.add_argument("--limit", type=int, default=30)
+    research.add_argument("--firecrawl", action="store_true", help="extract unsupported pages as unverified evidence (uses credits)")
+    research.set_defaults(func=cmd_verify_outreach)
+    discover = sub.add_parser("discover", help="bounded Exa discovery; results require ATS verification")
+    discover.add_argument("query")
+    discover.add_argument("--limit", type=int, default=5)
+    discover.add_argument("--out", default="research/discovered.csv")
+    discover.set_defaults(func=cmd_discover)
 
     sub.add_parser("rescore", help="re-apply current rules to every stored job"
                    ).set_defaults(func=cmd_rescore)
@@ -1099,8 +1126,27 @@ def main() -> None:
     m.add_argument("--limit", type=int, default=30)
     m.set_defaults(func=cmd_models)
 
+    from jobagent.runtime import atomic_json, now_iso
     args = parser.parse_args()
-    args.func(args)
+    started = now_iso()
+    RUN_DETAILS.clear()
+    code = 1
+    try:
+        code = args.func(args) or 0
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+    except Exception as exc:
+        RUN_DETAILS["error_type"] = type(exc).__name__
+        console.print(f"[red]{type(exc).__name__}[/red]: " +
+                      (str(exc) if isinstance(exc, (ValueError, FileNotFoundError))
+                       or type(exc).__name__ == "GmailAuthError" else "Command failed; no success recorded."))
+    finally:
+        if args.command in ("fetch", "score", "digest", "apply-kit", "draft-outreach", "verify-outreach", "rescore") and not getattr(args, "dry_run", False):
+            atomic_json(ROOT / "logs" / f"last-{args.command}.json", {
+                "command": args.command, "started_at": started, "finished_at": now_iso(),
+                "status": "ok" if code == 0 else "partial" if code == 2 else "failed",
+                "exit_code": code, **RUN_DETAILS})
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":

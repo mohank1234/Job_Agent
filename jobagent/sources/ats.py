@@ -115,7 +115,8 @@ def _ashby_parse(slug: str, data: dict) -> list[Job]:
         loc = j.get("location", "") or ""
         desc = clean_html(j.get("descriptionPlain") or j.get("descriptionHtml", ""))
         remote = j.get("isRemote")
-        workplace = "remote" if remote else infer_workplace(loc, desc[:600])
+        stated = str(j.get("workplaceType", "")).lower()
+        workplace = stated if stated in ("remote", "hybrid", "onsite") else "remote" if remote else infer_workplace(loc, desc[:600])
         jobs.append(
             Job(
                 source="ashby",
@@ -301,7 +302,7 @@ async def _workday_fetch_detail(
     """
     path = job.raw.get("_workday_detail_path") if isinstance(job.raw, dict) else None
     if not path:
-        return
+        return "missing detail path"
     url = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}{path}"
     try:
         resp = await client.get(url, headers={**UA, "Accept": "application/json"},
@@ -312,8 +313,10 @@ async def _workday_fetch_detail(
         if full_desc:
             job.description = full_desc
             job.workplace = infer_workplace(job.location, "", full_desc[:600])
-    except (httpx.HTTPError, ValueError):
-        pass   # keep the bulletFields snippet already set by _workday_parse
+        else:
+            return "empty job description"
+    except (httpx.HTTPError, ValueError) as exc:
+        return type(exc).__name__
 
 
 async def _workday_fetch(
@@ -356,13 +359,13 @@ async def _workday_fetch(
 
     async def _fill(job: Job) -> None:
         async with detail_sem:
-            await _workday_fetch_detail(client, tenant, wd, site, job)
+            return await _workday_fetch_detail(client, tenant, wd, site, job)
 
-    await asyncio.gather(*(_fill(j) for j in jobs))
+    failures = [e for e in await asyncio.gather(*(_fill(j) for j in jobs)) if e]
     for j in jobs:
         if isinstance(j.raw, dict):
             j.raw.pop("_workday_detail_path", None)
-    return vendor, slug, jobs, None
+    return vendor, slug, jobs, f"{len(failures)} job descriptions unavailable" if failures else None
 
 
 # Vendors whose board needs more than a single plain GET.
@@ -380,7 +383,15 @@ async def _fetch_board(
         if resp.status_code == 404:
             return vendor, slug, [], "404 — slug not found on this vendor"
         resp.raise_for_status()
-        return vendor, slug, parse_fn(slug, resp.json()), None
+        data = resp.json()
+        if vendor == "lever":
+            if not isinstance(data, list):
+                raise ValueError("Expected a postings array")
+        else:
+            key = "jobs"
+            if not isinstance(data, dict) or not isinstance(data.get(key), list):
+                raise ValueError(f"Expected a {key} array")
+        return vendor, slug, parse_fn(slug, data), None
     except httpx.HTTPStatusError as exc:
         return vendor, slug, [], f"HTTP {exc.response.status_code}"
     except (httpx.HTTPError, ValueError) as exc:
@@ -393,7 +404,10 @@ async def _gather(boards: dict[str, list[str]], concurrency: int = 12):
 
         async def guarded(vendor, slug):
             async with sem:
-                return await _fetch_board(client, vendor, slug)
+                try:
+                    return await _fetch_board(client, vendor, slug)
+                except Exception as exc:
+                    return vendor, slug, [], type(exc).__name__
 
         tasks = [
             guarded(vendor, slug)
@@ -401,10 +415,15 @@ async def _gather(boards: dict[str, list[str]], concurrency: int = 12):
             if vendor in ADAPTERS or vendor in CUSTOM_FETCHERS
             for slug in (slugs or [])
         ]
-        return await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
+        results.extend((vendor, slug, [], "unsupported vendor")
+                       for vendor, slugs in boards.items()
+                       if vendor not in ADAPTERS and vendor not in CUSTOM_FETCHERS
+                       for slug in (slugs or ["(no boards)"]))
+        return results
 
 
-def fetch_ats(boards: dict[str, list[str]]) -> tuple[list[Job], list[str]]:
+def fetch_ats(boards: dict[str, list[str]], outcomes=None) -> tuple[list[Job], list[str]]:
     """Fetch every configured company board concurrently.
 
     Returns (jobs, errors). A failed board used to be indistinguishable from
@@ -415,10 +434,13 @@ def fetch_ats(boards: dict[str, list[str]]) -> tuple[list[Job], list[str]]:
     results = asyncio.run(_gather(boards))
     jobs: list[Job] = []
     errors: list[str] = []
+    outcomes = outcomes if outcomes is not None else []
     for vendor, slug, board_jobs, err in results:
         jobs.extend(board_jobs)
         if err:
             errors.append(f"ATS {vendor}/{slug}: {err}")
+        outcomes.append({"source": f"ats/{vendor}/{slug}", "fetched": len(board_jobs),
+                         "status": "partial" if err and board_jobs else "error" if err else "ok", "issues": [err] if err else []})
     return jobs, errors
 
 

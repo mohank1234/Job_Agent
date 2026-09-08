@@ -28,7 +28,7 @@ $log = Join-Path $root "logs\draft-outreach.log"
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
 
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"cd '$root'; python run.py draft-outreach *>> '$log'`"" `
+    -Argument "-NoProfile -WindowStyle Hidden -File `"$root\Run-DraftOutreach.ps1`"" `
     -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -Daily -At 4:15pm
 

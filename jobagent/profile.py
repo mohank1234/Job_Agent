@@ -212,7 +212,8 @@ class Profile:
             f"; onsite/hybrid is also in scope in: {', '.join(self.onsite_countries)}"
             if self.onsite_countries else ""
         )
-        home = ", ".join(self.locations) if self.locations else "the candidate's home country"
+        # Search markets are not residence or work authorisation.
+        home = self.preferences.get("home_country", "India")
         remote_scope = home.title()
         return (
             f"Geography (strict): REMOTE roles only if the employer accepts "

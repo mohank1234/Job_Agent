@@ -282,3 +282,5 @@ outreach:
     credentials_path: credentials.json
     token_path: token.json
     mode: draft_only          # the only mode that exists right now
+    sheet_id: ""             # fixed ID; never silently choose the newest same-name file
+    expected_sender: ""      # authenticated Gmail account must match

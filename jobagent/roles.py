@@ -661,16 +661,14 @@ def singapore_eligibility(job: Job, profile: Profile) -> tuple[str, str | None]:
     if m:
         if m.group(1).lower() == "below":
             return "below_floor", (
-                f"Singapore salary is under the Employment Pass floor of "
-                f"S${profile.ep_min_monthly_sgd:,.0f}/month, so no employer "
-                f"can sponsor this one"
+                f"Singapore salary is under the configured salary screen of "
+                f"S${profile.ep_min_monthly_sgd:,.0f}/month. Verify current "
+                f"Employment Pass criteria and employer sponsorship separately."
             )
         return "salary_meets_floor", (
-            f"Singapore salary meets the Employment Pass floor of "
-            f"S${profile.ep_min_monthly_sgd:,.0f}/month, so sponsorship is "
-            f"legally possible - but nothing in the posting says the "
-            f"employer will actually sponsor. Confirm intent before "
-            f"investing time."
+            f"Singapore salary meets the configured salary screen of "
+            f"S${profile.ep_min_monthly_sgd:,.0f}/month. This does not verify "
+            f"Employment Pass eligibility or employer sponsorship. Confirm both."
         )
 
     return "unspecified", (

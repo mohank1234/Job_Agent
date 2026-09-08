@@ -71,7 +71,12 @@ def create_session(context_id: str, persist: bool = True, timeout_seconds: int =
             f"{API_BASE}/sessions",
             headers=_headers(),
             json={
-                "browserSettings": {"context": {"id": context_id, "persist": persist}},
+                "browserSettings": {
+                    "context": {"id": context_id, "persist": persist},
+                    "recordSession": False,
+                    "logSession": False,
+                    "solveCaptchas": False,
+                },
                 "timeout": timeout_seconds,
             },
             timeout=TIMEOUT,
@@ -97,6 +102,29 @@ def get_live_view_url(session_id: str) -> str:
         )
         resp.raise_for_status()
         return resp.json()["debuggerFullscreenUrl"]
+    except Exception as exc:
+        if isinstance(exc, BrowserbaseError):
+            raise
+        raise classify_http_error(exc, "Browserbase") from exc
+
+
+def get_session(session_id: str) -> dict:
+    """Read session metadata. connectUrl contains credentials: never log it."""
+    try:
+        resp = httpx.get(f"{API_BASE}/sessions/{session_id}", headers=_headers(), timeout=TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        if isinstance(exc, BrowserbaseError):
+            raise
+        raise classify_http_error(exc, "Browserbase") from exc
+
+
+def get_context(context_id: str) -> dict:
+    try:
+        resp = httpx.get(f"{API_BASE}/contexts/{context_id}", headers=_headers(), timeout=TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
     except Exception as exc:
         if isinstance(exc, BrowserbaseError):
             raise

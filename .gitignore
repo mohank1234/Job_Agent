@@ -24,7 +24,13 @@ token.json
 # re-running draft-outreach doesn't create duplicates. Not secret, just
 # runtime state - like jobs.db, not meant for version control.
 outreach_draft_ledger.json
+outreach_draft_ledger.lock
+outreach_draft_ledger.json.*.tmp
+token.json.*.tmp
 browserbase_contexts.json
+browserbase_contexts.lock
+browserbase_contexts.json.*.tmp
+research/
 
 # Generated / derived data - large, regenerable, not meant for version control.
 jobs.db

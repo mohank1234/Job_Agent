@@ -16,6 +16,8 @@ go in knowing it.
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 from pathlib import Path
 
 import build_resume as base
@@ -98,13 +100,38 @@ def gaps_against(jd_text: str) -> list[str]:
     ]
 
 
-def kit_slug(company: str, title: str) -> str:
+def kit_slug(company: str, title: str, posting_id: str = "") -> str:
     """Folder name for one job's kit.
 
     Shared with run.py so it can tell which jobs already have a kit without
     rebuilding them. Keep the two in step by calling this, never re-deriving.
     """
-    return re.sub(r"[^a-z0-9]+", "-", f"{company or ''}-{title or ''}".lower()).strip("-")[:70]
+    name = re.sub(r"[^a-z0-9]+", "-", f"{company or ''}-{title or ''}".lower()).strip("-")[:70]
+    return name + ("-" + hashlib.sha256(posting_id.encode()).hexdigest()[:12] if posting_id else "")
+
+
+def kit_version(job: dict) -> str:
+    personal = {k: v for k, v in vars(base).items() if k.isupper()}
+    code = Path(__file__).read_text(encoding="utf-8") + Path(base.__file__).read_text(encoding="utf-8")
+    text = json.dumps({"job": {k: job.get(k) for k in (
+        "url", "description", "title", "company", "score", "match_category", "priority", "location", "workplace")},
+        "resume": personal, "code": code}, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def select_kits(rows, apps_root: Path, limit: int, rebuild=False):
+    if limit < 0:
+        raise ValueError("Kit limit must be non-negative")
+    existing = set()
+    for path in apps_root.glob("*/*/kit.json"):
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            existing.add((meta["url"], meta["version"]))
+        except (ValueError, KeyError):
+            continue  # damaged metadata requires regeneration, not a silent skip
+    # Legacy folders lack a version: keep them intact and create a versioned
+    # kit once. Their company/title alone cannot prove which posting they use.
+    return [r for r in rows if rebuild or (r.get("url"), kit_version(r)) not in existing][:limit]
 
 
 def build_for_job(job: dict, out_dir: Path) -> dict:
@@ -123,7 +150,7 @@ def build_for_job(job: dict, out_dir: Path) -> dict:
     orig = (base.SKILLS, base.EXPERIENCE, base.TAGLINE)
     base.SKILLS, base.EXPERIENCE, base.TAGLINE = skills, experience, headline
 
-    folder = out_dir / kit_slug(company, title)
+    folder = out_dir / kit_slug(company, title, job.get("url") or job.get("fingerprint", ""))
     folder.mkdir(parents=True, exist_ok=True)
     fname = re.sub(r"[^A-Za-z0-9]+", "_", base.NAME).strip("_") + "_Resume"
     try:
@@ -152,6 +179,8 @@ def build_for_job(job: dict, out_dir: Path) -> dict:
     ]
     note += [f"- {g}" for g in gaps] or ["- None detected from the tool list."]
     (folder / "APPLICATION-NOTE.md").write_text("\n".join(note), encoding="utf-8")
+    from jobagent.runtime import atomic_json
+    atomic_json(folder / "kit.json", {"url": job.get("url"), "version": kit_version(job)})
 
     return {"folder": folder, "headline": headline, "gaps": gaps,
             "lead_skill": skills[0][0]}

@@ -124,8 +124,15 @@ def policy_version(profile: Profile, llm_cfg: dict) -> str:
     configured model left every cached verdict stale but still reused."""
     import hashlib
     import json
-    raw = json.dumps(profile.raw, sort_keys=True, default=str)
-    body = f"{_SYSTEM_VERSION}|{raw}|{llm_cfg.get('model','')}|{llm_cfg.get('provider','')}"
+    from pathlib import Path
+    # Include actual rules/prompt code so editing a policy cannot leave an old
+    # verdict valid merely because a manual version string was not bumped.
+    code = "".join(Path(__file__).with_name(n).read_text(encoding="utf-8")
+                   for n in ("matcher.py", "roles.py", "profile.py", "models.py"))
+    settings = {k: v for k, v in llm_cfg.items()
+                if not any(secret in k.lower() for secret in ("key", "token", "password"))}
+    body = json.dumps({"profile": profile.raw, "settings": settings,
+                       "system": SYSTEM, "code": code}, sort_keys=True, default=str)
     return hashlib.sha256(body.encode()).hexdigest()[:12]
 
 
@@ -197,8 +204,7 @@ def rule_match(job: Job, profile: Profile) -> None:
         f"{job.priority} priority — {label.lower()} on deterministic role/skill "
         f"matching (no LLM verdict yet)."
     )
-    if job.scored_by != "llm":
-        job.scored_by = "rules"
+    job.scored_by = "rules"
     apply_scope_cap(job, profile, profile.qa_roles_only)
 
 
@@ -250,6 +256,9 @@ def match_batch(provider, jobs: list[Job], profile: Profile, llm_weight: float) 
         f"{listing}"
     )
     batch = provider.structured(SYSTEM, prompt, MatchBatch)
+    indices = [entry.index for entry in batch.matches]
+    if sorted(indices) != list(range(len(jobs))):
+        raise ValueError("Model response must contain every job index exactly once")
     seen: set[int] = set()
     for entry in batch.matches:
         if 0 <= entry.index < len(jobs) and entry.index not in seen:

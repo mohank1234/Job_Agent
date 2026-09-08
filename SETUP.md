@@ -2,9 +2,11 @@
 
 ## Scoring model
 
-**Google Gemini free tier.** Verified free on 2026-08-20 by rate-limit probe:
-the API returns 429 with "check your plan and billing details" well inside the
-free ceiling, which a billing-enabled project would not do. No card, no charge.
+**Google Gemini is the configured scoring provider.** Account billing has not
+been verified by this project. A 429 response establishes a rate-limit failure;
+it does not establish whether billing is enabled or whether prior calls cost
+money. The measurements below are historical notes and were not rerun in the
+8 September 2026 review.
 
   model:      gemini-flash-latest        1.6 s/job, 6/6 scored, 0 failures
   fallbacks:  gemini-3-flash-preview, gemini-flash-lite-latest
@@ -313,13 +315,20 @@ stops at "create a reviewable draft."
 3. `token.json` (also gitignored) is written after that and refreshes
    itself; delete it to force re-authorization.
 
-**Not built:** Hunter and Apollo — checked 2026-09-08, their free tiers
-don't include API access (Hunter: Growth tier, $149/mo; Apollo: Organization
-tier, $119+/user/month, 3-user minimum). Browserbase — key is configured
-(`BROWSERBASE_API_KEY`) but no adapter exists; nothing in this pipeline
-currently needs interactive browser automation. Google Antigravity — not
-integrable here at all; it's an IDE/agent product, not an API a standalone
-Python script can call.
+**Browserbase:** `jobagent/enrich/browserbase.py` and
+`python tools/browserbase_login_setup.py --site both` provide bounded sessions
+with persistent contexts and human sign-in. The optional controller dependency
+is in `requirements-browser.txt`; a hosted browser does not require a local
+Chromium download. Recording, browser logs and automated CAPTCHA solving are
+disabled. The script confirms account navigation separately from reaching the
+login page and never submits applications. Sessions consume Browserbase quota.
+
+Hunter, Apollo and Antigravity have no callable integration in this project.
+Provider pricing and account quotas require checking with the provider; key
+presence does not prove a free tier or a working connection.
+
+The current verification, draft safeguards, read-only reply evidence and test
+instructions are documented in [AUDIT_STATUS.md](AUDIT_STATUS.md).
 
 ## Runs by itself
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -29,6 +30,12 @@ _SECTION_PATTERNS = {
 def clean_html(text: str | None) -> str:
     if not text:
         return ""
+    # Greenhouse can return escaped HTML inside its JSON content field.
+    for _ in range(2):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
     return _WS.sub(" ", _TAGS.sub(" ", text)).strip()
 
 
@@ -120,12 +127,12 @@ class Job:
         dedup check) may omit it, but anything gating a cached LLM verdict
         must pass the current `matcher.policy_version(profile, llm_cfg)`.
         """
-        body = (
-            f"{self.title}|{self.location}|{self.workplace}|"
-            f"{self.role_family}|{self.role_tier}|{self.seniority}|"
-            f"{policy_version}|"
-            f"{self.description[:4000]}"
-        )
+        body = json.dumps({name: getattr(self, name) for name in (
+            "source", "company", "title", "url", "location", "workplace",
+            "description", "salary", "posted_at", "role_family", "role_label",
+            "role_tier", "seniority", "base_score", "candidate", "evidence",
+            "gap_terms", "years_required", "classification_notes",
+        )} | {"policy": policy_version}, sort_keys=True, default=str)
         return hashlib.sha256(body.encode()).hexdigest()[:16]
 
     @property

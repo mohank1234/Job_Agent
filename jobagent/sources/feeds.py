@@ -19,6 +19,13 @@ UA = {"User-Agent": "job-agent/1.0 (personal job search)"}
 TIMEOUT = httpx.Timeout(25.0, connect=10.0)
 
 
+def _issue(cfg, label, exc):
+    # Never include exception URLs: Adzuna places its API key in the query.
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    (cfg or {}).get("_issues", []).append(
+        f"{label}: {type(exc).__name__}" + (f" HTTP {status}" if status else ""))
+
+
 def _date(value) -> datetime | None:
     if not value:
         return None
@@ -92,7 +99,8 @@ def _remotive(client, cfg=None) -> list[Job]:
                 client,
                 f"https://remotive.com/api/remote-jobs?limit=100&search={quote(term)}",
             ))
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as exc:
+            _issue(cfg, f"remotive query {term}", exc)
             continue          # one bad query must not lose the whole source
     return jobs
 
@@ -145,7 +153,8 @@ def _jobicy(client, cfg=None) -> list[Job]:
             jobs += _jobicy_rows(_get(
                 client, f"https://jobicy.com/api/v2/remote-jobs?count=100&geo={quote(geo)}"
             ))
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as exc:
+            _issue(cfg, f"jobicy region {geo}", exc)
             continue
     return jobs
 
@@ -173,10 +182,8 @@ def _mcf_salary_note(salary: dict | None, floor: float) -> tuple[str, str]:
     band = f"S${lo:,}-{hi:,}" if lo else f"S${hi:,}"
     return verdict, (
         f"\n\n[work authorisation: monthly salary {band} {verdict} the "
-        f"Employment Pass floor of S${floor:,.0f}. "
-        + ("An EP is legally possible for this role."
-           if verdict == "meets" else
-           "No employer can sponsor an EP below the floor.")
+        f"configured salary screen of S${floor:,.0f}. "
+        + "This is a configured salary screen, not verification of EP eligibility or sponsorship."
         + "]"
     )
 
@@ -206,7 +213,8 @@ def _mycareersfuture(client, cfg=None) -> list[Job]:
             )
             resp.raise_for_status()
             results = resp.json().get("results") or []
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as exc:
+            _issue(cfg, f"mycareersfuture query {term}", exc)
             continue
 
         for j in results:
@@ -249,11 +257,12 @@ def _mycareersfuture(client, cfg=None) -> list[Job]:
                 return
             try:
                 d = client.get(MCF_JOB.format(uuid=uuid), timeout=30)
+                d.raise_for_status()
                 if d.status_code == 200:
                     body = clean_html(d.json().get("description") or "")
                     job.description = body + job.description
-            except (httpx.HTTPError, ValueError):
-                pass
+            except (httpx.HTTPError, ValueError) as exc:
+                _issue(cfg, f"mycareersfuture detail {uuid}", exc)
 
         with ThreadPoolExecutor(max_workers=12) as pool:
             list(pool.map(_describe, jobs))
@@ -292,14 +301,21 @@ def _himalayas(client, cfg=None) -> list[Job]:
     want = int((cfg or {}).get("max_jobs", 400))
     jobs: list[Job] = []
     offset = 0
+    seen_pages = set()
     while len(jobs) < want:
-        data = _get(
-            client,
-            f"https://himalayas.app/jobs/api?limit={limit}&offset={offset}",
-        )
+        try:
+            data = _get(client, f"https://himalayas.app/jobs/api?limit={limit}&offset={offset}")
+        except (httpx.HTTPError, ValueError) as exc:
+            _issue(cfg, f"himalayas offset {offset}", exc)
+            break
         rows = data.get("jobs") or []
         if not rows:
             break
+        signature = repr(rows)
+        if signature in seen_pages:
+            _issue(cfg, "himalayas repeated page", ValueError())
+            break
+        seen_pages.add(signature)
         for j in rows:
             loc = ", ".join(j.get("locationRestrictions") or []) or "Remote"
             lo, hi = j.get("minSalary"), j.get("maxSalary")
@@ -322,10 +338,10 @@ def _himalayas(client, cfg=None) -> list[Job]:
                     raw=j,
                 )
             )
-        offset += limit
-        if offset >= int(data.get("totalCount") or 0):
+        offset += len(rows)
+        if data.get("totalCount") is not None and offset >= int(data["totalCount"]):
             break
-    return jobs
+    return jobs[:want]
 
 
 def _weworkremotely(client, cfg=None) -> list[Job]:
@@ -343,7 +359,8 @@ def _weworkremotely(client, cfg=None) -> list[Job]:
                 headers=UA, timeout=TIMEOUT,
             )
             resp.raise_for_status()
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            _issue(cfg, f"weworkremotely category {cat}", exc)
             continue
         for entry in feedparser.parse(resp.content).entries:
             # WWR titles are "Company: Role"
@@ -423,7 +440,8 @@ def _adzuna(client, cfg: dict) -> list[Job]:
                     url += f"&where={quote(where)}"
                 try:
                     data = _get(client, url)
-                except (httpx.HTTPError, ValueError):
+                except (httpx.HTTPError, ValueError) as exc:
+                    _issue(cfg, f"adzuna {country} query {term} page {page}", exc)
                     break            # bad key or rate limit: stop this branch
                 rows = _adzuna_rows(data)
                 jobs.extend(rows)
@@ -432,10 +450,11 @@ def _adzuna(client, cfg: dict) -> list[Job]:
     return jobs
 
 
-def fetch_feeds(sources: dict) -> tuple[list[Job], list[str]]:
+def fetch_feeds(sources: dict, outcomes=None) -> tuple[list[Job], list[str]]:
     """Returns (jobs, errors). One dead feed never kills the run."""
     jobs: list[Job] = []
     errors: list[str] = []
+    outcomes = outcomes if outcomes is not None else []
     # (config key, handler, takes per-source config)
     handlers = [
         ("remoteok", _remoteok, False),
@@ -450,15 +469,22 @@ def fetch_feeds(sources: dict) -> tuple[list[Job], list[str]]:
     with httpx.Client(follow_redirects=True) as client:
         for name, fn, takes_cfg in handlers:
             cfg = sources.get(name)
-            if not cfg:                       # false, absent, or empty
+            if not cfg or isinstance(cfg, dict) and cfg.get("enabled") is False:
+                outcomes.append({"source": name, "status": "disabled", "fetched": 0})
                 continue
+            issues = []
+            before = len(jobs)
             try:
                 jobs.extend(
-                    fn(client, cfg if isinstance(cfg, dict) else {})
+                    fn(client, {**(cfg if isinstance(cfg, dict) else {}), "_issues": issues})
                     if takes_cfg else fn(client)
                 )
             except Exception as exc:  # a flaky third-party feed is not fatal
-                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+                _issue({"_issues": issues}, name, exc)
+            count = len(jobs) - before
+            errors.extend(issues)
+            outcomes.append({"source": name, "status": "partial" if issues and count else "error" if issues else "ok",
+                             "fetched": count, "issues": issues})
 
         mail = sources.get("mailbox") or {}
         if mail.get("enabled"):
@@ -466,13 +492,26 @@ def fetch_feeds(sources: dict) -> tuple[list[Job], list[str]]:
             mail_jobs, mail_errors = fetch_mailbox(mail)
             jobs.extend(mail_jobs)
             errors.extend(mail_errors)
+            outcomes.append({"source": "mailbox", "status": "partial" if mail_errors and mail_jobs else "error" if mail_errors else "ok", "fetched": len(mail_jobs), "issues": mail_errors})
+        else:
+            outcomes.append({"source": "mailbox", "status": "disabled", "fetched": 0})
 
         adz = sources.get("adzuna") or {}
         if adz.get("enabled") and adz.get("app_id") and adz.get("app_key"):
             for country in adz.get("countries") or [adz.get("country", "in")]:
+                issues = []
+                before = len(jobs)
                 try:
-                    jobs.extend(_adzuna(client, {**adz, "country": country}))
+                    jobs.extend(_adzuna(client, {**adz, "country": country, "_issues": issues}))
                 except Exception as exc:
-                    errors.append(f"adzuna/{country}: {type(exc).__name__}: {exc}")
+                    _issue({"_issues": issues}, f"adzuna/{country}", exc)
+                count = len(jobs) - before
+                errors.extend(issues)
+                outcomes.append({"source": f"adzuna/{country}", "status": "partial" if issues and count else "error" if issues else "ok", "fetched": count, "issues": issues})
+        elif adz.get("enabled"):
+            errors.append("adzuna: enabled but app_id/app_key missing")
+            outcomes.append({"source": "adzuna", "status": "error", "fetched": 0, "issues": [errors[-1]]})
+        else:
+            outcomes.append({"source": "adzuna", "status": "disabled", "fetched": 0})
 
     return jobs, errors

@@ -45,12 +45,10 @@ cp config.yaml.example config.yaml     # then edit it — see below
 cp profile.yaml.example profile.yaml   # then fill in your real profile
 ```
 
-Matching runs through **Gemini's free tier** — no card, no local gateway to
-run. `llm.provider: gemini` in `config.yaml` selects it, with `groq` and the
-now-removed `omnirate` (a local OmniRoute gateway, used until 2026-08-20) as
-the fallback chain's other free-tier options. The `anthropic` and
-`openrouter` providers still exist in `jobagent/llm.py` but are paid and off
-by default. Get a Gemini key in 60 seconds at
+`llm.provider: gemini` in `config.yaml` selects Gemini. Other implemented
+providers are in `jobagent/llm.py`. Model and fallback selection follow the
+configuration; provider availability and billing depend on the actual account
+and model. The project does not measure billing. Get a Gemini key at
 https://aistudio.google.com/apikey, then
 `setx GEMINI_API_KEY "your-key"` (reopen the terminal afterward). See
 `config.yaml.example`'s `llm:` block for the full provider/model rationale.
@@ -170,9 +168,8 @@ Find the slug from any job posting URL on their careers page:
 
 Add it to `companies.yaml`, then run `python run.py verify` to confirm.
 
-Aim for 100–200 target companies. That is where this stops being a toy and
-starts beating manual searching — you see everything they post, the day they
-post it.
+Source coverage depends on configured boards and successful fetches. Check
+the per-source outcomes in `logs/last-fetch.json`; a digest can be partial.
 
 ## Run it daily
 
@@ -187,13 +184,14 @@ Trigger:   Daily, 8:00 AM
 
 ## On auto-apply
 
-Not implemented, on purpose. Programmatic submission violates every major
-portal's ToS and gets accounts banned — and mass-generic applications are
-exactly what gets filtered out of the 25 LPA band anyway.
+See [AUDIT_STATUS.md](AUDIT_STATUS.md) for the current evidence, tests, remaining
+account requirements and the verified-outreach commands added on 8 September 2026.
 
-`tailor` covers the useful half: a job-specific pitch you paste into the
-application yourself. Applying to 10 roles with a tailored pitch beats 200
-identical submissions, and it's what actually converts at this level.
+Application submission is not implemented. `apply-kit` prepares local resumes
+and notes; `draft-outreach` creates only reviewed Gmail drafts. Neither proves
+an application was submitted, a message was delivered, or an employer replied.
+Browserbase supports human sign-in; authenticated account actions still require
+site-specific handling and truthful answers to application questions.
 
 ## Layout
 

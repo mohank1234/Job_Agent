@@ -302,7 +302,7 @@ class Store:
         job.scored_by = "cache"
         return True
 
-    def record_match(self, job: Job, reported: bool | None = None) -> None:
+    def record_match(self, job: Job, reported: bool | None = None, *, commit=True) -> None:
         fields = [
             "score=?", "verdict=?", "match_category=?", "match_category_label=?",
             "priority=?", "why_matches=?", "matching_skills=?", "missing_skills=?",
@@ -321,9 +321,10 @@ class Store:
         self.conn.execute(
             f"UPDATE seen SET {', '.join(fields)} WHERE fingerprint = ?", values
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
-    def record_classification(self, job: Job, policy_version: str = "") -> None:
+    def record_classification(self, job: Job, policy_version: str = "", *, commit=True) -> None:
         """Persist the stage-1 classification fields (role_family, candidate,
         base_score, etc.) plus content_hash.
 
@@ -351,7 +352,14 @@ class Store:
                 job.fingerprint,
             ),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
+
+    def record_evaluation(self, job: Job, policy_version: str) -> None:
+        """Never expose a new policy hash paired with an old match after a crash."""
+        with self.conn:
+            self.record_classification(job, policy_version, commit=False)
+            self.record_match(job, commit=False)
 
     def already_reported(self, fingerprint: str) -> bool:
         row = self.conn.execute(
@@ -483,7 +491,8 @@ class Store:
         }
 
     def top(self, limit: int = 25, categories: tuple[str, ...] = ("A", "B", "C"),
-            only_new: bool = False, today: str | None = None) -> list[dict]:
+            only_new: bool = False, today: str | None = None,
+            max_age_days: float | None = None) -> list[dict]:
         """Best matches. With only_new, a job that appeared in an EARLIER day's
         digest is excluded, so every day's file contains jobs you have not seen.
 
@@ -494,12 +503,16 @@ class Store:
         where = [f"match_category IN ({marks})"]
         params: list = list(categories)
         if only_new:
-            today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today = today or datetime.now().strftime("%Y-%m-%d")
             where.append(
                 "(reported IS NULL OR reported = 0 "
                 " OR reported_on IS NULL OR reported_on = ?)"
             )
             params.append(today)
+        if max_age_days is not None:
+            where.append("(posted_at IS NULL OR julianday(posted_at) IS NULL "
+                         "OR julianday('now') - julianday(posted_at) <= ?)")
+            params.append(float(max_age_days))
         params.append(limit)
         rows = self.conn.execute(
             f"""SELECT * FROM seen
@@ -511,7 +524,7 @@ class Store:
 
     def mark_reported(self, fingerprints, today: str | None = None) -> None:
         """Record that these jobs went into today's digest."""
-        today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = today or datetime.now().strftime("%Y-%m-%d")
         for fp in fingerprints:
             self.conn.execute(
                 "UPDATE seen SET reported = 1, "

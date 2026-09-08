@@ -1,8 +1,7 @@
 """Daily digest.
 
-Only A / B / C matches inside the freshness window are shown, newest first —
-a role answered on day one sits near the front of the recruiter's pile.
-Jobs that do not fit are pruned from the database after matching.
+Only A / B / C matches inside the configured freshness window are shown.
+This report does not verify that an opening is still live or track submissions.
 """
 
 from __future__ import annotations
@@ -15,10 +14,10 @@ from .models import Job
 # the same role on day six, because the pile the recruiter is reading is
 # smaller. Fit still decides ordering WITHIN each window.
 FRESHNESS_SECTIONS = [
-    (0, "Posted in the last 24 hours", "Apply today — you are near the front of the queue."),
-    (1, "Posted in the last 2 days", "Still early. Apply now."),
-    (2, "Posted in the last 4 days", "Worth applying; the pile is filling up."),
-    (3, "Posted this week", "Last of the useful window."),
+    (0, "Posted in the last 24 hours", "Check the live listing and location before applying."),
+    (1, "Posted in the last 2 days", "Review the requirements and stated gaps."),
+    (2, "Posted in the last 4 days", "Confirm that the opening is still listed."),
+    (3, "Older postings", "Check current availability before applying."),
     (9, "Posting date not published", "The board did not state a date — check the listing."),
 ]
 CATEGORY_ORDER = {"A": 0, "B": 1, "C": 2}
@@ -72,7 +71,7 @@ def build_markdown(
         rows: list[tuple[str, str]] = [
             ("Jobs in database", stats.get("total_seen")),
             ("Candidates identified", stats.get("candidates")),
-            ("Scored", stats.get("scored")),
+            ("Match records updated (rules or LLM)", stats.get("scored")),
         ]
         if stats.get("fetched") is not None:
             rows += [
@@ -100,8 +99,7 @@ def build_markdown(
             rows.append((
                 "Model",
                 f"`{stats['model']}`"
-                + (f" via {via} (configured as free-tier)" if via
-                   else " (configured as free-tier)"),
+                + (f" via {via}; billing not measured" if via else "; billing not measured"),
             ))
 
         lines += ["| | |", "|---|---|"]
@@ -111,7 +109,7 @@ def build_markdown(
     if not shown:
         lines += [
             "No A/B/C matches inside the freshness window this run. Widen "
-            "`retention.max_age_days` in config.yaml, or add companies to "
+            "`digest.max_age_days` in config.yaml, or add companies to "
             "`companies.yaml`. Check `python run.py stats` for what was seen.",
             "",
         ]
@@ -141,6 +139,7 @@ def build_markdown(
                 f"- **Location:** {job.location or 'n/a'} · {job.workplace}"
                 + (f" · {job.salary}" if job.salary else ""),
                 f"- **Source:** {job.source} ({job.source_type})",
+                "- **Listing availability:** not reverified by digest generation",
                 f"- **Why it matches:** {_fmt_list(job.why_matches)}",
                 f"- **Matching skills:** {_fmt_list(job.matching_skills)}",
                 f"- **Missing skills:** {_fmt_list(job.missing_skills, 'none identified')}",
@@ -161,12 +160,12 @@ def build_markdown(
         "_Only postings from the last "
         f"{stats.get('window_days')} days are considered._ "
         if stats and stats.get("window_days") else
-        "_Only recent postings are considered._ "
+        "_No posting-age limit was supplied. Unknown dates need review._ "
     )
     if stats and stats.get("pruned") is not None:
         footer += (
             f"_{stats['pruned']} non-matching or stale jobs were pruned this "
-            f"run; a tombstone keeps them from ever being re-scored._"
+            f"run; unchanged postings under the same policy are skipped._"
         )
     lines += ["---", "", footer.strip(), ""]
     return "\n".join(lines)

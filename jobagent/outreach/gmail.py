@@ -20,7 +20,7 @@ or a full Picker UI flow. Never request more than the feature in use needs.
 Setup (see SETUP.md):
   1. Google Cloud Console -> enable Gmail API -> create an OAuth 2.0 Client
      ID (Desktop app) -> download as credentials.json in the project root.
-  2. First call to `authenticate()` opens a browser for one-time consent and
+  2. `python run.py gmail-auth` opens a browser for one-time consent and
      writes token.json (also gitignored) so future calls don't re-prompt.
   3. token.json is refreshed automatically when it expires; delete it to
      force re-authorization (e.g. after changing scopes or accounts) — this
@@ -33,8 +33,10 @@ Official docs: https://developers.google.com/workspace/gmail/api/guides/sending
 from __future__ import annotations
 
 import base64
+import json
 from email.mime.text import MIMEText
 from pathlib import Path
+from jobagent.runtime import atomic_json
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
@@ -56,9 +58,9 @@ class GmailAuthError(Exception):
         super().__init__(message)
 
 
-def authenticate():
-    """Return valid Credentials, running the one-time consent flow or a
-    silent refresh as needed. Raises GmailAuthError if credentials.json is
+def authenticate(*, interactive=False, required_scopes=None):
+    """Return valid Credentials, refreshing silently if possible. Only
+    interactive=True permits a consent flow. Raises GmailAuthError if setup is
     missing — there is no way to proceed without it, and no default to fall
     back to."""
     try:
@@ -72,9 +74,16 @@ def authenticate():
             "google-api-python-client google-auth-httplib2 google-auth-oauthlib",
         ) from exc
 
+    scopes = required_scopes or SCOPES
     creds = None
     if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+        except (ValueError, KeyError) as exc:
+            if not interactive:
+                raise GmailAuthError("auth_failed", "Invalid token file; run gmail-auth to repair consent") from exc
+        if creds and not creds.has_scopes(scopes):
+            creds = None
 
     if creds and creds.valid:
         return creds
@@ -82,15 +91,18 @@ def authenticate():
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+            atomic_json(TOKEN_PATH, json.loads(creds.to_json()))
             return creds
         except Exception as exc:
-            raise GmailAuthError(
-                "auth_failed",
-                f"Token refresh failed ({exc}) — delete token.json and re-run "
-                f"to re-authorize.",
-            ) from exc
+            if not interactive:
+                raise GmailAuthError(
+                    "auth_failed",
+                    f"Token refresh failed ({type(exc).__name__}); run gmail-auth to re-authorize.",
+                ) from exc
+            creds = None
 
+    if not interactive:
+        raise GmailAuthError("consent_required", "Run `python run.py gmail-auth` interactively. Scheduled runs never open consent.")
     if not CREDENTIALS_PATH.exists():
         raise GmailAuthError(
             "no_credentials",
@@ -101,9 +113,11 @@ def authenticate():
 
     # First-time consent: opens a browser, spins up a local server on
     # localhost to catch the redirect. One-time per machine/account.
-    flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), scopes)
     creds = flow.run_local_server(port=0)
-    TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+    if not creds.has_scopes(scopes):
+        raise GmailAuthError("missing_scope", "Required Gmail/Drive scopes were not granted")
+    atomic_json(TOKEN_PATH, json.loads(creds.to_json()))
     return creds
 
 
@@ -118,7 +132,7 @@ def get_authenticated_sender(creds=None) -> str:
     return profile["emailAddress"]
 
 
-def read_sheet_as_csv(file_name: str, creds=None) -> str:
+def read_sheet_as_csv(file_name: str | None = None, creds=None, *, file_id=None) -> str:
     """Find a Google Sheet by exact name (Drive search) and return its
     content as CSV text (Drive's export endpoint, not the separate Sheets
     API — one scope covers both finding and reading). Raises GmailAuthError
@@ -130,27 +144,36 @@ def read_sheet_as_csv(file_name: str, creds=None) -> str:
     creds = creds or authenticate()
     drive = build("drive", "v3", credentials=creds)
 
-    safe_name = file_name.replace("'", "\\'")
-    resp = drive.files().list(
-        q=f"name = '{safe_name}' and trashed = false",
-        fields="files(id, name, mimeType, modifiedTime)",
-    ).execute()
-    files = resp.get("files", [])
-    if not files:
-        raise GmailAuthError("invalid_response", f"No Drive file named exactly {file_name!r} found")
-    if len(files) > 1:
-        newest = max(files, key=lambda f: f["modifiedTime"])
-        files = [newest]  # exact-name collisions shouldn't happen given the naming scheme, but don't guess silently wrong
-
-    file_id = files[0]["id"]
+    mime = "application/vnd.google-apps.spreadsheet"
+    if file_id:
+        meta = drive.files().get(fileId=file_id, fields="id,mimeType,trashed").execute()
+        if meta.get("trashed") or meta.get("mimeType") != mime:
+            raise GmailAuthError("invalid_source", "Configured file is not an active Google Sheet")
+    else:
+        if not file_name:
+            raise GmailAuthError("invalid_source", "Configure outreach.gmail.sheet_id or pass --sheet-id")
+        safe_name = file_name.replace("\\", "\\\\").replace("'", "\\'")
+        files, token = [], None
+        while True:
+            resp = drive.files().list(
+                q=f"name = '{safe_name}' and trashed = false and mimeType = '{mime}'",
+                fields="nextPageToken,files(id,name)", pageSize=100, pageToken=token,
+            ).execute()
+            files.extend(resp.get("files", []))
+            token = resp.get("nextPageToken")
+            if not token:
+                break
+        if len(files) != 1:
+            raise GmailAuthError("ambiguous_source", f"Expected one Sheet named {file_name!r}, found {len(files)}; use its fixed ID")
+        file_id = files[0]["id"]
     try:
         content = drive.files().export(fileId=file_id, mimeType="text/csv").execute()
     except HttpError as exc:
-        raise GmailAuthError("invalid_response", f"Could not export {file_name!r} as CSV: {exc}") from exc
+        raise GmailAuthError("invalid_response", f"Sheet export failed (HTTP {exc.resp.status})") from exc
     return content.decode("utf-8") if isinstance(content, bytes) else content
 
 
-def create_draft(to: str, subject: str, body: str, creds=None) -> dict:
+def create_draft(to: str, subject: str, body: str, creds=None, *, message_key=None, expected_sender=None) -> dict:
     """Create a Gmail draft. Returns {draft_id, message_id, sender}.
 
     Never sends. The draft sits in the authenticated account's Drafts folder
@@ -162,11 +185,17 @@ def create_draft(to: str, subject: str, body: str, creds=None) -> dict:
     creds = creds or authenticate()
     service = build("gmail", "v1", credentials=creds)
     sender = get_authenticated_sender(creds)
+    if expected_sender and sender.casefold() != expected_sender.casefold():
+        raise GmailAuthError("wrong_account", "Authenticated Gmail account differs from expected_sender")
+    if any(c in to + subject for c in "\r\n"):
+        raise ValueError("Recipient and subject must be single-line values")
 
     message = MIMEText(body)
     message["to"] = to
     message["from"] = sender
     message["subject"] = subject
+    if message_key:
+        message["Message-ID"] = f"<jobagent-{message_key}@draft.local>"
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
 
     draft = service.users().drafts().create(

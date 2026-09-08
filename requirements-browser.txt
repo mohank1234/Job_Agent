@@ -1,0 +1,2 @@
+# Optional controller for the hosted Chromium session. No local browser download.
+playwright>=1.61

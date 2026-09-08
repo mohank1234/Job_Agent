@@ -57,7 +57,12 @@ Write-Log "=== Job Agent daily run ==="
 function Test-DayDone {
     # Run-Daily writes the marker only once the digest is on disk, so its
     # content is the cheapest honest proof that today is already covered.
-    (Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $today)
+    $statePath = Join-Path $root "logs\daily-status-$today.json"
+    if (-not (Test-Path -LiteralPath $statePath)) { return $false }
+    try {
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        return ($state.status -eq 'ok') -and (Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $today)
+    } catch { return $false }
 }
 
 function Test-Online {
@@ -155,7 +160,7 @@ if (-not $env:GEMINI_API_KEY) {
     Write-Log "       https://aistudio.google.com/apikey), then sign out and in."
     Write-Log "       Continuing with deterministic scoring only."
 } else {
-    Write-Log "Scoring model: Gemini free tier (key present)"
+    Write-Log "Gemini key present. The scoring command verifies its configured provider; billing is not measured."
 }
 
 $env:PYTHONIOENCODING = "utf-8"
@@ -180,7 +185,16 @@ if (-not $SkipFetch) {
         $failures += "fetch exited $LASTEXITCODE"
         Write-Log "ERROR: fetch failed (exit $LASTEXITCODE)."
     }
-    $sourceCoverageIssues = @($fetchOutput | Select-String -Pattern "note:\s*(ATS |mailbox:)")
+    $statusPath = Join-Path $root "logs\last-fetch.json"
+    try {
+        $fetchStatus = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+        $sourceCoverageIssues = @($fetchStatus.sources | Where-Object { $_.status -in @('error', 'partial') })
+        if ($fetchStatus.status -ne 'ok' -or ([datetime]$fetchStatus.finished_at).ToLocalTime().ToString('yyyy-MM-dd') -ne $today) {
+            $failures += 'fetch status is incomplete or stale'
+        }
+    } catch {
+        $failures += 'fetch status missing or invalid'
+    }
     if ($sourceCoverageIssues.Count -gt 0) {
         Write-Log "WARNING: $($sourceCoverageIssues.Count) source(s) failed this run - digest coverage is partial. See notes above."
     }
@@ -198,6 +212,10 @@ $previous = [int]::MaxValue
 $stalled = 0
 while ((Get-Date) -lt $deadline) {
     $remaining = [int](python tools\backlog.py | Select-Object -Last 1).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        $failures += 'backlog check failed'
+        break
+    }
     if ($remaining -le 0) {
         Write-Log "Scoring backlog is empty."
         break
@@ -205,6 +223,7 @@ while ((Get-Date) -lt $deadline) {
     if ($remaining -ge $previous) {
         $stalled++
         if ($stalled -ge 2) {
+            $failures += "scoring stalled with $remaining eligible candidates left"
             Write-Log "Scoring made no progress in $stalled passes - $remaining left unscored."
             Write-Log "       These keep their deterministic score. Cause is usually a"
             Write-Log "       missing or rate-limited API key; see the note above."
@@ -218,9 +237,16 @@ while ((Get-Date) -lt $deadline) {
     Write-Log "Scoring pass $pass - $remaining candidates still unscored"
     python run.py score --limit 200 2>&1 | Select-String -Pattern "LLM-scored|note:" |
         Write-LogStream
+    if ($LASTEXITCODE -ne 0) {
+        $failures += "scoring incomplete (exit $LASTEXITCODE)"
+        break
+    }
 }
 
 # --- 4. Digest --------------------------------------------------------------
+if ((Get-Date) -ge $deadline -and $remaining -gt 0) {
+    $failures += 'scoring time budget ended before backlog completion'
+}
 # The digest is the deliverable, so this is the step that decides whether the
 # day succeeded. `digest` can also exit 0 having written nothing, so the file
 # itself is checked rather than the exit code alone.
@@ -258,6 +284,7 @@ if ($LASTEXITCODE -ne 0) {
     # Not a failure for the day: the digest already tells you where to apply,
     # and re-running the whole fetch to rebuild a kit is a poor trade.
     Write-Log "WARNING: apply-kit exited $LASTEXITCODE - build the kits by hand with"
+    $failures += "application kits incomplete (exit $LASTEXITCODE)"
     Write-Log "         python run.py apply-kit --top $kitCount"
 }
 
@@ -266,19 +293,31 @@ if ($LASTEXITCODE -ne 0) {
 # cleanly and left a digest on disk. Exit code matters too: it is what Task
 # Scheduler records as Last Run Result, and until now a crashed pipeline still
 # reported 0 there.
-if ($lock) { $lock.Close() }
-
-if ($failures.Count -eq 0) {
+if ($SkipFetch) {
+    try {
+        $fetchStatus = Get-Content -LiteralPath (Join-Path $root 'logs\last-fetch.json') -Raw | ConvertFrom-Json
+        if ($fetchStatus.status -ne 'ok' -or ([datetime]$fetchStatus.finished_at).ToLocalTime().ToString('yyyy-MM-dd') -ne $today) {
+            $failures += 'no complete fetch verified today'
+        }
+    } catch { $failures += 'no fetch status available' }
+}
+if ($failures.Count -eq 0 -and $sourceCoverageIssues.Count -eq 0) {
+    @{status='ok'; finished_at=(Get-Date).ToString('o'); failures=@()} | ConvertTo-Json |
+        Set-Content -LiteralPath (Join-Path $root "logs\daily-status-$today.json") -Encoding UTF8
     Set-Content -Path $marker -Value $today -Encoding UTF8
     if ($sourceCoverageIssues.Count -gt 0) {
         Write-Log "=== Done WITH PARTIAL COVERAGE: digest_$today.md ($($sourceCoverageIssues.Count) source(s) failed - see WARNING above) ==="
     } else {
         Write-Log "=== Done. Digest: digest_$today.md ==="
     }
+    if ($lock) { $lock.Close() }
     exit 0
 }
 
 Write-Log "=== FAILED: $($failures -join '; ') ==="
+@{status='partial'; finished_at=(Get-Date).ToString('o'); failures=$failures; source_issues=$sourceCoverageIssues} | ConvertTo-Json -Depth 6 |
+    Set-Content -LiteralPath (Join-Path $root "logs\daily-status-$today.json") -Encoding UTF8
+if ($lock) { $lock.Close() }
 Write-Log "    No success marker written, so the day stays uncovered: the next"
 Write-Log "    logon or network-connect event retries it, and 11:00 is the backstop."
 exit 1

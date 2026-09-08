@@ -423,6 +423,7 @@ seniority:
 # delete jobs from the database.
 # -----------------------------------------------------------------------------
 preferences:
+  home_country: India        # residence; distinct from the search markets below
   # Global search. Remote roles anywhere are in scope; onsite roles are in
   # scope in these markets. Locations affect the SCORE, never storage.
   locations:
