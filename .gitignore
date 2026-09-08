@@ -20,6 +20,12 @@ config.yaml
 credentials.json
 token.json
 
+# Local state tracking which outreach rows already got a Gmail draft, so
+# re-running draft-outreach doesn't create duplicates. Not secret, just
+# runtime state - like jobs.db, not meant for version control.
+outreach_draft_ledger.json
+browserbase_contexts.json
+
 # Generated / derived data - large, regenerable, not meant for version control.
 jobs.db
 jobs.db.bak-*
@@ -34,3 +40,7 @@ __pycache__/
 # Editor / OS
 .vscode/
 .DS_Store
+
+# Claude Code: settings.json is shared project config (tracked); settings.local.json
+# is the per-machine override file, like .env.local - never commit it.
+.claude/settings.local.json

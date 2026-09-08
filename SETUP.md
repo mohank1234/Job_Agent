@@ -221,6 +221,39 @@ Wellfound and "Work at a Startup" themselves are treated like LinkedIn/Naukri
 — no public API, no scraping — so they're a place to read postings by eye,
 not an automated fetch source.
 
+**Verifying an ATS hit is really the target company, not a slug collision.**
+A guessed vendor+slug returning HTTP 200 with a non-empty jobs array is not
+proof of identity — ATS slugs are global per-vendor namespaces, not scoped to
+any list of candidates. Short or generic company names (Pulse, Aviary,
+Castle, Tailor, Extend, Momentic, Profound) have repeatedly turned out to
+belong to an unrelated company that happens to hold the same slug (a Qatar
+healthcare-staffing firm under Greenhouse `pulse`; a biotech company under
+Greenhouse `profound` with roles like "Senior Scientist, Cardiovascular and
+Metabolic Disease"). Collision rate on short/dictionary-word names has run
+around 1-in-10 across two discovery passes (YC pass, then the 10-VC-firm
+pass). Before trusting any ATS hit: sample 1-2 actual job titles/locations
+from the response and check they're thematically and geographically
+consistent with the target company. Build this into the probing step itself,
+not as an afterthought — it's cheap and it's the only thing standing between
+the pipeline and silently onboarding the wrong company.
+
+**Fetching VC/accelerator portfolio pages: a fallback ladder, not a single
+retry.** These pages fail in three distinct ways that need different
+handling — don't collapse them into one "retry with WebSearch" step:
+1. *Wrong URL* (fixable) — the obvious path 404s; a WebSearch for
+   `site:<domain> portfolio` or similar usually finds the real one (e.g.
+   Peak XV's real path is `/our-companies`, not `/companies`).
+2. *Stale or misleading content at a plausible URL* (fixable by trying a
+   sibling page) — e.g. a16z's `/portfolio/` reads stale, but
+   `/investment-list/` is current.
+3. *Genuinely absent server-rendered content* (not fixable by more
+   fetching) — company names exist only as image logos with no text in the
+   server-rendered HTML (e.g. 500 Global). No amount of WebFetch retrying
+   recovers names that were never in the payload, and falling back to
+   WebSearch here tends to surface only already-huge, already-tracked
+   companies rather than fresh mid-size ones — treat this as a flagged
+   low-value source, not silent "coverage."
+
 **Non-traditional titles.** Don't gate discovery on the literal string "QA
 Engineer" — also watch for AI Quality, AI/LLM/Model/Agent Evaluation, RAG
 Evaluation, AI Reliability, AI Data Quality, Quality Engineering, SDET, Test

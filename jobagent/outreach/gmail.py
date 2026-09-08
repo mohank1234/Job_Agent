@@ -7,9 +7,15 @@ prevent duplicates across reruns, and an explicit user-enabled policy. Until
 that exists, this module's job stops at "create a draft you can review in
 Gmail and send yourself."
 
-Scope: gmail.compose only — covers draft creation now and (once a sending
-policy exists) sending, without granting broader mailbox access like reading
-arbitrary mail. Never request more than the feature in use needs.
+Scope: gmail.compose (draft creation now and, once a sending policy exists,
+sending — without granting access to read arbitrary mail) plus
+drive.readonly, added 2026-09-08 specifically to find and read the
+"JobAgent Outreach Report" Sheet the cloud outreach routine writes to. Read-
+only, and used for nothing else — never write, delete, or touch any other
+file with this scope. drive.file (access only to files this app creates)
+would be tighter but cannot read a pre-existing file it didn't create, and
+there's no lighter scope that can find a file by name without either that
+or a full Picker UI flow. Never request more than the feature in use needs.
 
 Setup (see SETUP.md):
   1. Google Cloud Console -> enable Gmail API -> create an OAuth 2.0 Client
@@ -17,7 +23,9 @@ Setup (see SETUP.md):
   2. First call to `authenticate()` opens a browser for one-time consent and
      writes token.json (also gitignored) so future calls don't re-prompt.
   3. token.json is refreshed automatically when it expires; delete it to
-     force re-authorization (e.g. after changing scopes or accounts).
+     force re-authorization (e.g. after changing scopes or accounts) — this
+     IS required after the drive.readonly scope was added, since an
+     existing token only carries the scopes it was originally granted.
 
 Official docs: https://developers.google.com/workspace/gmail/api/guides/sending
 """
@@ -28,7 +36,10 @@ import base64
 from email.mime.text import MIMEText
 from pathlib import Path
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
 
 ROOT = Path(__file__).parent.parent.parent
 CREDENTIALS_PATH = ROOT / "credentials.json"
@@ -105,6 +116,38 @@ def get_authenticated_sender(creds=None) -> str:
     service = build("gmail", "v1", credentials=creds)
     profile = service.users().getProfile(userId="me").execute()
     return profile["emailAddress"]
+
+
+def read_sheet_as_csv(file_name: str, creds=None) -> str:
+    """Find a Google Sheet by exact name (Drive search) and return its
+    content as CSV text (Drive's export endpoint, not the separate Sheets
+    API — one scope covers both finding and reading). Raises GmailAuthError
+    if no file with that exact name is found, or if more than one is (so a
+    caller doesn't silently read the wrong one)."""
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+
+    creds = creds or authenticate()
+    drive = build("drive", "v3", credentials=creds)
+
+    safe_name = file_name.replace("'", "\\'")
+    resp = drive.files().list(
+        q=f"name = '{safe_name}' and trashed = false",
+        fields="files(id, name, mimeType, modifiedTime)",
+    ).execute()
+    files = resp.get("files", [])
+    if not files:
+        raise GmailAuthError("invalid_response", f"No Drive file named exactly {file_name!r} found")
+    if len(files) > 1:
+        newest = max(files, key=lambda f: f["modifiedTime"])
+        files = [newest]  # exact-name collisions shouldn't happen given the naming scheme, but don't guess silently wrong
+
+    file_id = files[0]["id"]
+    try:
+        content = drive.files().export(fileId=file_id, mimeType="text/csv").execute()
+    except HttpError as exc:
+        raise GmailAuthError("invalid_response", f"Could not export {file_name!r} as CSV: {exc}") from exc
+    return content.decode("utf-8") if isinstance(content, bytes) else content
 
 
 def create_draft(to: str, subject: str, body: str, creds=None) -> dict:

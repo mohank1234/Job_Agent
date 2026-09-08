@@ -691,6 +691,124 @@ def cmd_gmail_auth(_args) -> None:
     console.print("Token saved to token.json — future runs won't re-prompt unless it's deleted or revoked.")
 
 
+DRAFT_LEDGER_PATH = ROOT / "outreach_draft_ledger.json"
+EMAIL_RE = __import__("re").compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _extract_email(email_cell: str) -> str | None:
+    """The Sheet's Email column (split out from the old combined 'Contact
+    Value' column on 2026-09-08) should already hold nothing but a bare
+    address or be blank. Still run it through the regex rather than trusting
+    it verbatim - a stray label or trailing note from an off-schema row
+    shouldn't produce a garbage recipient."""
+    if not email_cell:
+        return None
+    m = EMAIL_RE.search(email_cell)
+    return m.group(0) if m else None
+
+
+def cmd_draft_outreach(args) -> None:
+    """Read the 'JobAgent Outreach Report' Sheet and create a real Gmail
+    draft for every row that has an extractable recipient email and hasn't
+    already been drafted in a previous run of this command.
+
+    DRAFT-ONLY: this never sends anything. Every draft lands in your Gmail
+    Drafts folder for you to review before sending it yourself - creating
+    a draft is not authorization to send it, and this command does not
+    send.
+    """
+    import csv
+    import io
+    import json
+
+    from jobagent.outreach.gmail import GmailAuthError, create_draft, read_sheet_as_csv
+
+    ledger: dict = {}
+    if DRAFT_LEDGER_PATH.exists():
+        ledger = json.loads(DRAFT_LEDGER_PATH.read_text(encoding="utf-8"))
+
+    sheet_name = args.sheet or "JobAgent Outreach Report"
+    console.print(f"[bold]Reading '{sheet_name}' from Google Drive...[/bold]")
+    try:
+        csv_text = read_sheet_as_csv(sheet_name)
+    except GmailAuthError as exc:
+        console.print(f"[red]Could not read the sheet ({exc.kind}):[/red] {exc}")
+        return
+
+    rows = list(csv.DictReader(io.StringIO(csv_text)))
+    console.print(f"  {len(rows)} rows found\n")
+
+    # Dedupe by ACTUAL DESTINATION ADDRESS, not by row identity. Two
+    # different named contacts (e.g. two co-founders) can share one mailbox
+    # (team@company.com) with no personal email listed for either — sending
+    # each of them a separate draft would mean two near-identical emails
+    # landing in the same inbox. What matters for avoiding a duplicate
+    # fan-out is the destination, not how many rows happen to name a person
+    # at that destination. Pull already-used emails (per company, since the
+    # same person's personal email legitimately differs by company) from the
+    # ledger regardless of which row originally sent to it.
+    already_emailed = {
+        (v.get("company", ""), v.get("email", "")) for v in ledger.values()
+    }
+
+    created = skipped_no_email = skipped_already = skipped_no_content = 0
+    skipped_dup_recipient = 0
+    for row in rows:
+        key = f"{row.get('S.No','')}|{row.get('Company','')}|{row.get('Contact Name','')}"
+        company = row.get("Company", "")
+        if key in ledger:
+            skipped_already += 1
+            continue
+
+        email = _extract_email(row.get("Email", ""))
+        subject = (row.get("Email Subject") or "").strip()
+        body = (row.get("Email Body") or "").strip()
+
+        if not email:
+            skipped_no_email += 1
+            continue
+        if not subject or not body:
+            skipped_no_content += 1
+            continue
+        if (company, email) in already_emailed:
+            skipped_dup_recipient += 1
+            console.print(f"  [yellow]skipped[/yellow] {company} <{email}> — "
+                          f"{row.get('Contact Name','')} shares this mailbox with "
+                          f"a contact already drafted; not sending a second copy "
+                          f"to the same inbox")
+            continue
+
+        if args.dry_run:
+            console.print(f"  [dim](dry-run) would draft:[/dim] {company} <{email}> — {subject}")
+            already_emailed.add((company, email))
+            continue
+
+        try:
+            result = create_draft(to=email, subject=subject, body=body)
+            ledger[key] = {"draft_id": result["draft_id"], "email": email,
+                           "company": company, "drafted_at": _now_iso()}
+            already_emailed.add((company, email))
+            created += 1
+            console.print(f"  [green]drafted[/green] {company} <{email}> — {subject[:60]}")
+        except GmailAuthError as exc:
+            console.print(f"  [red]failed[/red] {company} <{email}>: [{exc.kind}] {exc}")
+
+    if not args.dry_run:
+        DRAFT_LEDGER_PATH.write_text(json.dumps(ledger, indent=2), encoding="utf-8")
+
+    console.print(f"\n[bold]{created} drafts created[/bold]" + (" (dry run, none actually created)" if args.dry_run else ""))
+    console.print(f"  {skipped_already} already drafted in a previous run")
+    console.print(f"  {skipped_dup_recipient} skipped — same company+mailbox as a contact already drafted this run")
+    console.print(f"  {skipped_no_email} skipped — no email in the Email column (LinkedIn-only contacts)")
+    console.print(f"  {skipped_no_content} skipped — missing subject or body")
+    console.print("\nAll drafts are in your Gmail Drafts folder. Nothing was sent.")
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 def cmd_rescore(args) -> None:
     """Re-classify and re-score EVERY stored job under the current rules.
 
@@ -949,6 +1067,14 @@ def main() -> None:
 
     sub.add_parser("gmail-auth", help="one-time Gmail OAuth consent (opens your browser)"
                    ).set_defaults(func=cmd_gmail_auth)
+
+    draft = sub.add_parser("draft-outreach",
+                           help="create Gmail drafts from the Outreach Report sheet (never sends)")
+    draft.add_argument("--sheet", default=None,
+                       help="sheet name (default: 'JobAgent Outreach Report')")
+    draft.add_argument("--dry-run", action="store_true",
+                       help="show what would be drafted without creating anything")
+    draft.set_defaults(func=cmd_draft_outreach)
 
     sub.add_parser("rescore", help="re-apply current rules to every stored job"
                    ).set_defaults(func=cmd_rescore)
