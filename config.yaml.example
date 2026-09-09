@@ -284,3 +284,13 @@ outreach:
     mode: draft_only          # the only mode that exists right now
     sheet_id: ""             # fixed ID; never silently choose the newest same-name file
     expected_sender: ""      # authenticated Gmail account must match
+
+# Vacancy report publishing is independent of the old cloud contact report.
+# A separate drive.file token grants access only to app-created/selected files.
+# Folder/report IDs are checkpointed in gitignored drive_output_state.json.
+drive_output:
+  expected_account: ""       # Google account in which output should be created
+  folder_name: "JobAgent Output"
+  discovery_queries:         # used only with explicit refresh-report --discover
+    - "QA Engineer SDET Playwright Selenium remote India hiring"
+    - "AI QA Engineer LLM evaluation SDET Hyderabad India hiring"

@@ -8,6 +8,26 @@ explains *why* each job fits and how hard to chase it.
 It answers "which jobs available now are realistically worth me applying for?",
 not "which jobs contain my keywords?".
 
+## Verified jobs in Google Drive
+
+`python run.py refresh-report --publish` fetches current full descriptions from
+supported ATS boards, compares them with the profile, and updates a permanent
+Google Sheet inside **JobAgent Output**. The same folder contains the CSV,
+source evidence, run status, resume and outreach deliverables listed in the
+output manifest. An optional application tracker preserves user entries and
+is not recreated after deletion. The publisher
+reads uploaded files back before recording success. See [DRIVE_OUTPUT.md](DRIVE_OUTPUT.md).
+
+A reviewed startup catalog adds a **Startup shortlist** tab with funding
+sources, public professional contact evidence, tailored cold-email drafts and
+LinkedIn notes capped at 300 characters. Contact research retains its own date;
+changed JDs or stale research withhold the associated drafts until reviewed.
+
+This is separate from the historical cloud Claude contact-research routine.
+Cached database records and contact research are leads; they are not proof that
+a vacancy is currently open. The verified report uses current public ATS data
+and deterministic fit rules. It does not invoke or switch the configured LLM.
+
 ```
 sources -> normalize -> dedupe -> STORE ALL -> role classification ->
 candidate detection -> profile matching (LLM) -> score -> rank -> digest
@@ -25,17 +45,18 @@ database.
 Greenhouse, Lever, Ashby, SmartRecruiters and Workable expose public, documented
 JSON endpoints for every company board. That means:
 
-- **No scraping**, no auth, no ToS problem, no account-ban risk
-- Postings appear the moment they go live — usually hours before any aggregator
-  indexes them, which is when your application is at the top of the pile
-- AI-first companies almost all use one of these five vendors
+- Public posting APIs provide structured job details without applicant login.
+- The report checks whether a specific posting is currently returned by its board.
+- Coverage depends on the tracked boards and successful source responses.
 
 The aggregator feeds (RemoteOK, Remotive, Arbeitnow, Jobicy, optional Adzuna)
 add breadth on top.
 
-**LinkedIn and Naukri are deliberately not included.** Both prohibit automated
-access and ban accounts for it. Use their own saved-search email alerts for
-coverage there.
+LinkedIn and Naukri use a separate Browserbase login flow, where the account
+owner enters passwords and completes challenges. Signed-in pages were observed
+on 9 September 2026. Portal work is pending at the user's request after the
+Browserbase account exhausted its browser minutes; application submission has
+not been verified. The public ATS collector does not depend on those logins.
 
 ## Setup
 

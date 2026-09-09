@@ -60,7 +60,14 @@ def board_ref(url):
 
 def canonical(url):
     p = urlparse(url)
-    return (p.hostname or "").lower() + p.path.rstrip("/")
+    host = (p.hostname or "").lower()
+    if host == "boards.greenhouse.io":
+        host = "job-boards.greenhouse.io"
+    path = p.path.rstrip("/")
+    # ATS application forms and the posting describe the same requisition.
+    if host in ATS_HOSTS and path.endswith("/application"):
+        path = path[:-12]
+    return host + path
 
 
 def fetch_board(url, client):
@@ -110,7 +117,13 @@ def verify_row(row, profile, client, *, board_cache=None, use_firecrawl=False):
                 # specific opening. Add an ATS Job Link to verify it.
             else:
                 if ref not in cache:
-                    cache[ref] = fetch_board(url, client)
+                    try:
+                        cache[ref] = fetch_board(url, client)
+                    except Exception as exc:
+                        # A blocked board is one failed request, not one per row.
+                        cache[ref] = exc
+                if isinstance(cache[ref], Exception):
+                    raise cache[ref]
                 jobs, api_url = cache[ref]
                 matches = [j for j in jobs if canonical(j.url) == canonical(url)]
                 out["JD Source URL"] = api_url
@@ -124,34 +137,72 @@ def verify_row(row, profile, client, *, board_cache=None, use_firecrawl=False):
                         out.update({"JD Status": "verified_live", "JD Text": job.description,
                                     "JD Verified At": now_iso(), "Job Title": job.title,
                                     "Location": job.location, "Workplace": job.workplace,
+                                    "Salary (source)": job.salary or "Not stated in structured source; check full JD",
                                     "JD SHA256": hashlib.sha256(job.description.encode()).hexdigest()})
                         job.apply_classification(classify(job, profile))
                         rule_match(job, profile)
                         fit = "in_scope" if job.candidate and job.match_category in ("A", "B", "C") else "out_of_scope"
                         caveats = list(job.classification_notes)
                         requirements = list(dict.fromkeys(re.findall(
-                            r"\b\d{1,2}\+?\s+years?\b[^.\n]{0,130}", job.description, re.I)))
+                            r"\b\d{1,2}(?:\s*[-\u2013\u2014]\s*\d{1,2})?\+?(?:\s+or more)?\s+years?\b[^.\n]{0,130}", job.description, re.I)))
                         out["Experience Requirements (source excerpts)"] = " | ".join(requirements)
                         years = [int(re.match(r"\d+", text).group()) for text in requirements
                                  if re.search(r"experience|testing|automation|quality|QA|SDET", text, re.I)]
                         if years and max(years) > profile.years:
                             caveats.append(f"Posting includes a {max(years)}-year requirement; profile states approximately {profile.years:g} years. Review the full requirements.")
-                            fit = "needs_review"
+                            if fit == "in_scope":
+                                fit = "needs_review"
                         if re.search(r"fixed.term|\bcontract\b", job.title, re.I):
                             caveats.append("Fixed-term/contract role; confirm duration, benefits and compensation")
-                            fit = "needs_review"
+                            if fit == "in_scope":
+                                fit = "needs_review"
                         if job.workplace == "remote" and re.search(r"(?:office in|onsite|on-site|hybrid)", job.description, re.I):
                             caveats.append("Posting also mentions an office/onsite arrangement; confirm the role's remote terms")
-                            fit = "needs_review"
+                            if fit == "in_scope":
+                                fit = "needs_review"
                         raw = job.raw or {}
                         workplace = str(raw.get("workplaceType", "")).lower()
                         if raw.get("isRemote") and workplace in ("hybrid", "onsite", "on-site"):
-                            fit = "needs_review"
+                            if fit == "in_scope":
+                                fit = "needs_review"
                             caveats.append("ATS isRemote conflicts with workplaceType; confirm working arrangement")
                         if job.workplace == "remote" and remote_eligibility(job)[0] == "unspecified":
-                            fit = "needs_review"
+                            if fit == "in_scope":
+                                fit = "needs_review"
                             caveats.append("India-based remote eligibility is unconfirmed")
+                        # These are literal profile/JD overlaps, not an invented
+                        # assertion that every requirement has been met.
+                        mentioned = [s for s in profile.all_skills if re.search(
+                            r"(?<!\w)" + re.escape(s) + r"(?!\w)", job.description, re.I)]
+                        gaps = [s for s in profile.gaps if re.search(
+                            r"(?<!\w)" + re.escape(s) + r"(?!\w)", job.description, re.I)]
+                        if gaps:
+                            caveats.append("Known profile gaps mentioned in JD: " + ", ".join(gaps))
+                            if fit == "in_scope":
+                                fit = "needs_review"
+                        if "below current level" in " ".join(caveats):
+                            if fit == "in_scope":
+                                fit = "needs_review"
+                        intermediary = ref[1].lower() == "jobgether" or re.search(
+                            r"on behalf of (?:our |a )?(?:partner|client)|(?:our |a )partner company", job.description, re.I)
+                        out["Listing Type"] = "Intermediary; employer needs verification" if intermediary else "Company ATS board"
+                        if intermediary:
+                            caveats.append("Listed by an intermediary; verify the actual employer and its own careers posting before applying")
+                            if fit == "in_scope":
+                                fit = "needs_review"
+                        if re.search(r"\bmobile\b", job.title, re.I) and not any(
+                                term in profile.all_skills for term in ("appium", "espresso", "maestro", "flutter")):
+                            caveats.append("Mobile automation specialization is not established in the profile; review Appium/Flutter/Espresso requirements")
+                            if fit == "in_scope":
+                                fit = "needs_review"
+                        requirement = re.search(
+                            r"(?:required qualifications|requirements|what you.ll bring)\s*:?\s*(.{200,2000})",
+                            job.description, re.I | re.S)
+                        out["Requirements Excerpt (source)"] = requirement.group(0) if requirement else "Read the full JD; no standard requirements heading found"
                         out.update({"Fit Status": fit, "Fit Notes": "; ".join(caveats),
+                                    "Profile Skills Mentioned": ", ".join(mentioned),
+                                    "Known Gaps Mentioned": ", ".join(gaps),
+                                    "Scoring Method": "Deterministic rules; full requirements need review",
                                     "Rule Score": str(job.score)})
     except httpx.HTTPStatusError as exc:
         out["JD Status"] = "blocked" if exc.response.status_code in (401, 403, 429) else "fetch_error"
@@ -186,8 +237,8 @@ def verify_row(row, profile, client, *, board_cache=None, use_firecrawl=False):
     return out
 
 
-def csv_text(rows):
-    fields = list(dict.fromkeys(k for r in rows for k in r))
+def csv_text(rows, fields=None):
+    fields = fields or list(dict.fromkeys(k for r in rows for k in r)) or ["Company", "Job Link"]
     buf = io.StringIO(newline="")
     writer = csv.DictWriter(buf, fieldnames=fields, lineterminator="\n")
     writer.writeheader()

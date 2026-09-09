@@ -140,6 +140,14 @@ RE_NOT_SOFTWARE_QUALITY = _any(
     r"\bair quality\b",
 )
 
+# A professional-domain evaluator is not a software evaluation engineer.
+# Match the title, so software QA at a healthcare company remains eligible.
+RE_DOMAIN_EXPERT = _any(
+    r"\b(?:dermatologist|physician|surgeon|dentist|radiologist|pathologist|psychiatrist)\b",
+    r"\b(?:registered nurse|medical doctor|clinical psychologist|pharmacist|veterinarian)\b",
+    r"\b(?:attorney|lawyer|legal expert|medical expert)\b",
+)
+
 # Markers of industrial / factory QC, matched against the BODY rather than the
 # title. Singapore advertises shop-floor quality work as plain "QA Engineer",
 # so the title alone cannot separate it from software testing - the giveaway is
@@ -367,6 +375,8 @@ def _title_family(
 
     if RE_NOT_SOFTWARE_QUALITY.search(title):
         return "off_domain", ["quality/test role outside software"]
+    if RE_DOMAIN_EXPERT.search(title):
+        return "off_domain", ["professional-domain evaluation role; requires expertise outside software QA"]
 
     # A bare "QA Engineer" title says nothing about the domain. In India it is
     # software by default; in Singapore the same words usually mean factory,

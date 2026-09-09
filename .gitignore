@@ -19,6 +19,11 @@ config.yaml
 # Never commit either; both grant access to a real Gmail account.
 credentials.json
 token.json
+drive_token.json
+drive_token.json.*.tmp
+drive_output_state.json
+drive_output_state.json.*.tmp
+drive_output_state.lock
 
 # Local state tracking which outreach rows already got a Gmail draft, so
 # re-running draft-outreach doesn't create duplicates. Not secret, just

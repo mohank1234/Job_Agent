@@ -814,6 +814,54 @@ def cmd_outreach_status(args):
     return 2 if any(o["truncated"] for o in result["observations"]) else 0
 
 
+def cmd_drive_auth(args):
+    from jobagent.drive_output import authenticate_drive
+    cfg = load_yaml("config.yaml").get("drive_output", {})
+    authenticate_drive(cfg.get("expected_account"), interactive=True)
+    console.print("Drive access verified. Report publishing can now create and update its own files.")
+
+
+def cmd_publish_report(args):
+    from jobagent.drive_output import publish_report
+    cfg = load_yaml("config.yaml").get("drive_output", {})
+    result = publish_report(Path(args.out), cfg.get("expected_account"), cfg.get("folder_name", "JobAgent Output"))
+    RUN_DETAILS.update(publication=result)
+    console.print(f"Folder: {result['folder_url']}")
+    console.print(f"Verified report: {result['sheet_url']}")
+
+
+def cmd_refresh_report(args):
+    import json
+    from jobagent.output import build_report, database_leads, read_leads
+    from jobagent.startup_output import research_leads
+    from jobagent.runtime import process_lock
+    config = load_yaml("config.yaml")
+    profile = load_profile(ROOT / config.get("profile_file", "profile.yaml"))
+    cfg = config.get("drive_output", {})
+    if not 1 <= args.limit <= 100:
+        raise ValueError("Report limit must be between 1 and 100")
+    out = Path(args.out)
+    with process_lock(ROOT / "logs" / "refresh-report.lock"):
+        leads = research_leads(out)
+        leads += read_leads(args.csv) if args.csv else []
+        previous = out / "verified.csv"
+        if previous.exists():
+            leads += [r for r in read_leads(previous) if r.get("JD Status") == "verified_live"
+                      and r.get("Fit Status") != "out_of_scope"
+                      and "Intermediary" not in r.get("Listing Type", "")
+                      and "/jobgether/" not in r.get("Job Link", "")]
+        leads += database_leads(ROOT / config.get("database", "jobs.db"), profile, args.limit)
+        queries = cfg.get("discovery_queries", []) if args.discover else []
+        summary, rows = build_report(profile, leads, out, limit=args.limit,
+                                     discovery_queries=queries, progress=console.print)
+        RUN_DETAILS.update(report=summary)
+        console.print(json.dumps(summary, indent=2))
+        console.print(f"Local report: {(out / 'JobAgent Report.xlsx').resolve()}")
+        if args.publish:
+            cmd_publish_report(args)
+        return 2 if summary["status"] == "partial" else 0
+
+
 def cmd_rescore(args) -> None:
     """Re-classify and re-score EVERY stored job under the current rules.
 
@@ -1103,6 +1151,18 @@ def main() -> None:
     discover.add_argument("--out", default="research/discovered.csv")
     discover.set_defaults(func=cmd_discover)
 
+    sub.add_parser("drive-auth", help="one-time consent to create/update this app's Drive output files").set_defaults(func=cmd_drive_auth)
+    publish = sub.add_parser("publish-report", help="publish and read back an already prepared report bundle")
+    publish.add_argument("--out", default="research/report-latest")
+    publish.set_defaults(func=cmd_publish_report)
+    refresh = sub.add_parser("refresh-report", help="fetch full current JDs and produce a verified vacancy report")
+    refresh.add_argument("--csv", help="additional vacancy links to verify")
+    refresh.add_argument("--out", default="research/report-latest")
+    refresh.add_argument("--limit", type=int, default=50)
+    refresh.add_argument("--discover", action="store_true", help="also use configured bounded Exa searches (uses credits)")
+    refresh.add_argument("--publish", action="store_true", help="publish output into the permanent Drive folder and report")
+    refresh.set_defaults(func=cmd_refresh_report)
+
     sub.add_parser("rescore", help="re-apply current rules to every stored job"
                    ).set_defaults(func=cmd_rescore)
 
@@ -1141,7 +1201,7 @@ def main() -> None:
                       (str(exc) if isinstance(exc, (ValueError, FileNotFoundError))
                        or type(exc).__name__ == "GmailAuthError" else "Command failed; no success recorded."))
     finally:
-        if args.command in ("fetch", "score", "digest", "apply-kit", "draft-outreach", "verify-outreach", "rescore") and not getattr(args, "dry_run", False):
+        if args.command in ("fetch", "score", "digest", "apply-kit", "draft-outreach", "verify-outreach", "rescore", "refresh-report", "publish-report") and not getattr(args, "dry_run", False):
             atomic_json(ROOT / "logs" / f"last-{args.command}.json", {
                 "command": args.command, "started_at": started, "finished_at": now_iso(),
                 "status": "ok" if code == 0 else "partial" if code == 2 else "failed",

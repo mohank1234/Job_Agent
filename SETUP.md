@@ -567,3 +567,10 @@ above. The LLM scoring runs on Gemini's free tier — OmniRoute (mentioned
 earlier in this doc) was removed on 2026-08-20 and nothing launches it; this
 line used to still credit it, which was itself the kind of doc/code
 divergence flagged in the 2026-09-07 repo audit (finding #15) — fixed here.
+
+
+## Google Drive output
+
+See [DRIVE_OUTPUT.md](DRIVE_OUTPUT.md) for the verified vacancy report, one-time
+Drive consent, permanent folder and file IDs, daily refresh, and read-back checks.
+The legacy cloud contact report is a separate workflow and is not the new output.

@@ -1,6 +1,110 @@
-# Job Agent fixes and evidence — 8 September 2026
+# Job Agent fixes and evidence — 9 September 2026
 
-Reviewed and changed locally on `main`, based on commit `f95ee2bb00d1492fb5e95bd87ed95119f192cf43`. No branch switch, commit or push was performed. The earlier Claude audit covered an older commit; its reported successes are historical claims, not verification of this working tree.
+## Startup research and Drive delivery — 9 September 2026
+
+The latest `refresh-report --publish` completed with exit code 0. An independent
+Drive inventory found **14 active files in the same existing output folder**:
+the permanent Google report and every one of the 13 current local deliverables.
+The downloaded Google workbook's cell values match the local XLSX; the uploaded
+publication receipt matches byte for byte. Each other uploaded file was also
+downloaded and hash-compared by the publisher. Evidence:
+`logs/output-validation-2026-09-09.json`,
+`research/report-latest/publication.json`, and `logs/last-refresh-report.json`.
+
+- Checked **35 postings**: **34 current full descriptions**, with **7 ready for
+  review**, **25 requiring fit review**, **2 excluded**, and **1 closed posting**.
+  Rules-based fit does not establish every employer requirement.
+- Added a **Startup shortlist** tab with **five roles at four companies**:
+  Netomi SDET II and SDET I, Gather AI Senior QA, Certa SDET, and Sprinto Lead SDET.
+  Funding/YC sources, public senior-leader profiles, contact provenance, specific
+  skill gaps and five unsent outreach drafts accompany the full descriptions.
+  LinkedIn notes are **219, 240, 232, 241 and 245 characters**.
+- Three named leaders have public third-party email records; these are labeled
+  historical/unverified for delivery. Certa's company-published shared founders
+  mailbox is distinguished from a personal or hiring inbox. No guessed email
+  addresses or claims of hiring-manager ownership were added.
+- The reviewed research catalog seeds recurring refreshes. A changed or closed
+  JD, out-of-scope role or research older than 30 days withholds the affected
+  outreach draft until reviewed. Refreshing a job never silently refreshes the
+  contact research date. Cold drafts are local/Drive text, not Gmail drafts.
+- Regenerated the base resume from its corrected source so total QA tenure is
+  separate from current AI evaluation work, and published DOCX/Markdown copies.
+- The old optional Application Tracker was found **trashed**. Its deletion was
+  preserved; the publisher now permits other outputs to complete without
+  restoring or duplicating it. Manifest files are validated before remote writes.
+- **71 pytest regressions passed**, including changed/closed-job draft handling,
+  contact age, note length, source requirements, invalid manifests, repeated
+  publication, read-back checks and preservation of a trashed optional tracker.
+
+LinkedIn's signed-in feed and Naukri's personal homepage were observed after the
+user completed Browserbase login. The sessions subsequently ended; creating a
+new session returned HTTP 402, **Free plan browser minutes limit reached**.
+The user asked to keep portal work pending. Persisted login reuse, job forms,
+automatic application support and submission confirmation remain unverified.
+**Zero applications or outreach messages were submitted in this pass.** No model
+was switched or called by this reporting workflow. Earlier evidence below is
+historical and should not be read as the latest folder inventory or run count.
+
+## Current output delivery — 8 September 2026, 17:57 UTC
+
+The output repair is now verified live. The earlier changes below only produced
+local evidence; this pass connected verified vacancies to Google Drive.
+
+- Created one **JobAgent Output** folder containing a permanent **JobAgent -
+  Verified Jobs** Google Sheet, a separate **JobAgent - Application Tracker**,
+  `verified.csv`, `evidence.md` and `verification.json`.
+- First publication and a second refresh used the same folder and file IDs.
+  Downloaded the uploaded workbook and evidence files and compared their contents
+  with local output. Independent final inventory found exactly five files in the
+  folder. Evidence: `research/report-latest/publication.json` and
+  `logs/output-validation-2026-09-08.json`.
+- Latest scheduled run checked **30 postings**: **29 current listings with full
+  descriptions**, comprising **7 ready for review**, **20 with fit questions**
+  and **2 excluded**; **1 additional posting was no longer listed**. These are
+  observations from public ATS responses at the check time, not guarantees of
+  hiring eligibility or future availability.
+- Installed **JobAgent Verified Report** at **16:00 local time daily**. Started
+  it through Windows Task Scheduler and observed completion with **LastTaskResult
+  0**. The next scheduled run was 9 September 2026, 16:00 IST. Evidence:
+  `logs/last-refresh-report.json` and `logs/report-refresh.log`.
+- Disabled **JobAgent Draft Outreach**, cleared its retired Sheet input and
+  disabled the legacy Gmail-outreach switch locally. It no longer schedules
+  reads from the superseded cloud contact report. Reviewed CSV draft creation
+  remains available when deliberately re-enabled; no email was sent here.
+- Fixed incorrect promotion of out-of-scope roles to review, missing flags for
+  intermediaries and specialist/junior roles, duplicate ATS URL forms, repeated
+  blocked-board requests, and medical-expert evaluation roles entering software
+  QA results. Source JDs are preserved, including long descriptions split across
+  spreadsheet continuation columns when necessary.
+- Publishing uses a separate Google **drive.file** consent/token. The Gmail
+  token and the configured Gemini model were not changed. The Drive API imports
+  the workbook as Sheets, so the disabled Sheets API does not block publication.
+- **56/56 pytest regressions**, **111/111 classification cases**, and **12/12
+  offline mailbox cases** passed. Changed Python and PowerShell syntax checks
+  passed. Repeat creation, interrupted upload, stale evidence, manual report edits
+  and preservation of application-tracker entries have regression coverage.
+
+Remaining limits: the external Claude cloud routine is not controlled by this
+repository; it can still create its own separate reports. LinkedIn/Naukri login
+and auto-application submission are not completed. Gmail outcome collection needs
+separate read consent, and the new tracker has no imported application history.
+The legacy complete fetch/LLM/digest/kit pipeline has not been rerun in this pass.
+The verified-report workflow is bounded and currently supports three ATS vendors.
+The PC must be available for its scheduled refresh. No replies, interviews or
+applications are claimed as an outcome of these code fixes.
+
+Implementation: `jobagent/output.py`, `jobagent/drive_output.py`,
+`jobagent/outreach/verification.py`, `jobagent/roles.py`, `run.py`,
+`Run-Report.ps1`, `Install-Report-Schedule.ps1`, and `tests/test_output.py`.
+Setup and operating instructions are in `DRIVE_OUTPUT.md`.
+This pass is based on `12e9ec7` on `main`; code changes are local and uncommitted.
+No branch switch, commit or push was performed.
+
+## Historical local repair record
+
+The following record describes the earlier pass based on commit
+`f95ee2bb00d1492fb5e95bd87ed95119f192cf43`. Its live observations and test counts
+apply to that earlier pass and are superseded where the current section differs.
 
 ## What is fixed
 
