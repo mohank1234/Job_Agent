@@ -69,21 +69,6 @@ jobs:
           printf '%s' "$GMAIL_TOKEN_JSON" > token.json
           printf '%s' "$DRIVE_TOKEN_JSON" > drive_token.json
 
-      - name: One-time bootstrap - adopt the laptop's existing state (TEMPORARY, remove after first clean run)
-        env:
-          SEED_DRIVE_OUTPUT_STATE: ${{ secrets.SEED_DRIVE_OUTPUT_STATE }}
-          SEED_OUTREACH_LEDGER: ${{ secrets.SEED_OUTREACH_LEDGER }}
-          SEED_GMAIL_DRAFTS: ${{ secrets.SEED_GMAIL_DRAFTS }}
-          SEED_MORNING_LEDGER: ${{ secrets.SEED_MORNING_LEDGER }}
-        run: |
-          set -eu
-          printf '%s' "$SEED_DRIVE_OUTPUT_STATE" > drive_output_state.json
-          printf '%s' "$SEED_OUTREACH_LEDGER" > outreach_draft_ledger.json
-          printf '%s' "$SEED_GMAIL_DRAFTS" > gmail_report_drafts.json
-          mkdir -p research/morning-private
-          printf '%s' "$SEED_MORNING_LEDGER" > research/morning-private/ledger.json
-          python tools/ci_bootstrap_seed.py 1m_7YS9xtAPc1swJuyCGtzmgec5av9A1C
-
       - name: Run morning pipeline
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
