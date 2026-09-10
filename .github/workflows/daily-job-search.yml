@@ -1,0 +1,111 @@
+name: Daily job search
+
+# Runs the same `python run.py morning` pipeline the laptop's Task Scheduler
+# runs locally (see Install-Report-Schedule.ps1), but on GitHub's servers so
+# it fires even when the laptop is off. It only ever creates Gmail DRAFTS and
+# writes to the "JobAgent Output" Drive folder — nothing is ever sent
+# automatically; review and send by hand when you're back.
+#
+# in_window() in jobagent/morning.py restricts real work to 06:00-11:00 IST
+# regardless of the runner's own timezone, so multiple triggers below are
+# safe: only the first one each day does the run, the rest resume checkpoints
+# or no-op via the ledger in research/morning-private/.
+on:
+  schedule:
+    - cron: '0 1 * * *'   # 06:30 IST - primary run
+    - cron: '0 3 * * *'   # 08:30 IST - catch-up if the primary run failed/skipped
+    - cron: '0 5 * * *'   # 10:30 IST - last-chance catch-up before the window closes
+  workflow_dispatch: {}    # manual "Run workflow" button for on-demand runs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-job-search
+  cancel-in-progress: false
+
+jobs:
+  morning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore persistent state (jobs.db, ledgers, checkpoints)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            jobs.db
+            drive_output_state.json
+            outreach_draft_ledger.json
+            gmail_report_drafts.json
+            research/
+          key: jobagent-state-${{ github.run_id }}
+          restore-keys: |
+            jobagent-state-
+
+      - name: Write credentials and config from secrets
+        env:
+          JOBAGENT_CONFIG_YAML: ${{ secrets.JOBAGENT_CONFIG_YAML }}
+          JOBAGENT_PROFILE_YAML: ${{ secrets.JOBAGENT_PROFILE_YAML }}
+          JOBAGENT_RESUME_DATA_PY: ${{ secrets.JOBAGENT_RESUME_DATA_PY }}
+          GMAIL_CREDENTIALS_JSON: ${{ secrets.GMAIL_CREDENTIALS_JSON }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          DRIVE_TOKEN_JSON: ${{ secrets.DRIVE_TOKEN_JSON }}
+        run: |
+          set -eu
+          printf '%s' "$JOBAGENT_CONFIG_YAML" > config.yaml
+          printf '%s' "$JOBAGENT_PROFILE_YAML" > profile.yaml
+          mkdir -p resume
+          printf '%s' "$JOBAGENT_RESUME_DATA_PY" > resume/resume_data.py
+          printf '%s' "$GMAIL_CREDENTIALS_JSON" > credentials.json
+          printf '%s' "$GMAIL_TOKEN_JSON" > token.json
+          printf '%s' "$DRIVE_TOKEN_JSON" > drive_token.json
+
+      - name: Run morning pipeline
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          set +e
+          python run.py morning
+          code=$?
+          set -e
+          # 2 = "window_ended": the 11:00 IST deadline hit mid-run. Expected
+          # and not a failure - the next scheduled trigger resumes from the
+          # checkpoint. Anything else is a real failure.
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then
+            exit "$code"
+          fi
+
+      - name: Save persistent state for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            jobs.db
+            drive_output_state.json
+            outreach_draft_ledger.json
+            gmail_report_drafts.json
+            research/
+          key: jobagent-state-${{ github.run_id }}
+
+      - name: Upload logs and digest for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: job-agent-run-${{ github.run_id }}
+          path: |
+            digest_*.md
+            research/morning-private/
+          if-no-files-found: ignore
+          retention-days: 14
