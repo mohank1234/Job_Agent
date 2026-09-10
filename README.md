@@ -11,12 +11,24 @@ not "which jobs contain my keywords?".
 ## Verified jobs in Google Drive
 
 `python run.py morning` runs the daily public-board search, public contact
-research and unsent outreach, then publishes to the same Drive folder. Run
-`Install-Report-Schedule.ps1` to install a 06:00 IST task with checks every
-15 minutes until 11:00 and at logon. The computer must be awake, logged in and
-online. A process lock, daily ledger and saved checkpoints prevent duplicate
+research and unsent outreach, then publishes to the same Drive folder. The
+GitHub Actions workflow requests a 06:00 IST run with 08:30 and 10:30 catch-up
+triggers, so the laptop can be off. GitHub may delay scheduled triggers; the
+workflow starts job searches only within 06:00-11:00 IST. Keep the local tasks
+disabled while cloud scheduling is active. As a local alternative,
+`Install-Report-Schedule.ps1` requires the computer awake and online. A process
+lock, daily ledger and saved checkpoints prevent duplicate
 completed runs and resume interrupted work. Outside the window it does nothing;
 `--initial` is for an explicitly authorized setup run only.
+
+Cloud config, resume data, OAuth tokens, reviewed contacts and an explicit
+one-time state handoff live in GitHub Actions secrets. `JOBAGENT_STATE_KEY`
+encrypts the persistent checkpoint; private reports are not uploaded as public
+Actions artifacts. `JOBAGENT_STATE_BOOTSTRAP_JSON` uses a version marker so it
+does not overwrite newer cloud state on subsequent runs. Missing DOCX resumes
+are rebuilt from the private resume source; connections and attachment format
+are checked before the pipeline. Drive failures fail the run and preserve its
+checkpoint for retry rather than showing a successful publication.
 
 The morning workflow uses the configured research model (currently Gemini),
 and composes outreach from actual resume bullets and the current JD. It never
@@ -36,8 +48,14 @@ as pending research. Recruiting contacts are recorded separately from senior
 managers, so the email greeting matches its recipient. Public records do not confirm current ownership or
 authorize sending. Set `morning.signature_phone` in your local `config.yaml`
 to add your phone number on the line after your name in email drafts. The
-emails use short plain text, with no watermark, logo, generated-by footer, or
-custom Job Agent tracking header. The
+emails choose the user's short template for the recipient's role and close
+with `Thanks & regards`. Set `morning.resume_attachment` to your PDF or DOCX
+resume to attach it to each draft. Attachment bytes are checked after Gmail
+saves the draft; attachment edits are protected along with message edits.
+Without a configured resume, the text offers to share it and never claims it
+is attached. The body stays plain text, with no watermark, logo, generated-by
+footer, or custom Job Agent tracking header. Optional dated contacts in
+`morning.reviewed_contacts_file` survive a resumed older research cache. The
 draft ledger prevents duplicates, preserves user edits, and does not recreate
 missing drafts that might have been sent or deleted. No message is sent.
 Identical employer/title/JD listings are grouped, retaining their source links

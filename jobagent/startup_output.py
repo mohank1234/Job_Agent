@@ -22,6 +22,7 @@ RESEARCH_FIELDS = [
     "Approval Status", "Draft Generation", "Contact Status", "Backing Status",
     "Email Ownership Status", "Email Ownership Checked At",
     "Email Contact Name", "Email Contact Role", "Email Contact LinkedIn", "Company Display Name",
+    "Email Template",
 ]
 SHORTLIST_FIELDS = ["Company", "Job Title", "Location", "Job Link", "JD Text",
                     "Fit Status", "Fit Notes", "Framework Review", "Duplicate Listing URLs", *RESEARCH_FIELDS,

@@ -68,6 +68,22 @@ def test_once_daily_and_publish_resume(tmp_path):
     assert calls.count('work') == 2
 
 
+def test_gmail_failure_is_published_but_not_marked_completed(tmp_path):
+    calls = []
+    def work(*args, **kwargs):
+        calls.append('work')
+        return {'issues':[{'stage':'gmail_drafts','error':'ConnectionError'}] if calls.count('work') == 1 else []}
+    def publish(out):
+        calls.append('publish')
+        return {'verified':True}
+    kwargs = dict(initial=True, state_dir=tmp_path/'state', work=work, publish=publish,
+                  now=datetime(2026,9,10,16,tzinfo=morning.IST))
+    assert morning.run_daily({}, None, tmp_path/'out', **kwargs)['status'] == 'partial'
+    assert morning.run_daily({}, None, tmp_path/'out', **kwargs)['status'] == 'completed'
+    assert morning.run_daily({}, None, tmp_path/'out', **kwargs)['status'] == 'skipped_already_completed'
+    assert calls == ['work','publish','work','publish']
+
+
 def test_concurrent_run_cannot_enter(tmp_path):
     state = tmp_path/'state'
     with process_lock(state/'daily.lock'):
@@ -144,7 +160,7 @@ def test_drafts_grounded_cached_and_approval_pending(tmp_path):
     draft, reused = cached_draft(row, {}, facts, tmp_path)
     assert not reused
     assert 'Selenium automation and API testing' in draft['Cold Email']
-    assert draft['Cold Email'].endswith('Thanks,\nCandidate\n5550101234')
+    assert draft['Cold Email'].endswith('Thanks & regards,\nCandidate\n5550101234')
     assert draft['Cold Email'].count('5550101234') == 1
     assert '5550101234' not in draft['LinkedIn Note']
     assert len(draft['LinkedIn Note']) <= 300
@@ -201,3 +217,34 @@ def test_daily_work_exports_full_jd_decisions_and_drafts(tmp_path, monkeypatch):
     assert len(rows[0]['LinkedIn Note']) <= 300
     assert (out/'All Job Decisions.csv').is_file()
     assert (out/'JobAgent Report.xlsx').stat().st_size > 1000
+
+
+@pytest.mark.parametrize('role,number,phrase',[
+    ('Founder and CEO','1','sharing my attached resume'),
+    ('Technical Recruiter','3',"I've attached my resume"),
+    ('Vice President of Engineering','8','passing my attached resume'),
+    ('Chief Technology Officer','4','Is this opening on your team?'),
+    ('QA Manager','5','reviewing my attached resume'),
+])
+def test_user_templates_follow_actual_email_contact(role,number,phrase):
+    row={'Company':'Example','Job Title':'QA Engineer','JD Text':'Selenium and API tests'}
+    facts={'name':'Candidate','summary':'QA Engineer with 5 years of experience','bullets':['Built Selenium and API tests.'],'resume_attached':True}
+    metadata={'Manager Name':'Alex Leader','Manager Role':'CEO','Email Contact Name':'Sam Contact','Email Contact Role':role}
+    draft=grounded_draft(row,metadata,facts)
+    assert draft['Email Template'].startswith(number+' - ')
+    assert draft['Cold Email'].startswith('Hi Sam,') and phrase in draft['Cold Email']
+    assert draft['Cold Email'].endswith('Thanks & regards,\nCandidate')
+    assert draft['Cold Email Subject'].count('QA Engineer')<=1
+    facts['resume_attached']=False
+    assert 'attached' not in grounded_draft(row,metadata,facts)['Cold Email']
+
+
+def test_reviewed_recruiter_survives_old_cache_without_replacing_manager():
+    from jobagent.outreach.daily_research import apply_reviewed_contact
+    from jobagent.runtime import now_iso
+    metadata={'Manager Name':'Alex Leader','Manager Role':'CEO','Email Contact Name':'Old Contact'}
+    reviewed={'Public Work Email':'sam@example.com','Email Contact Name':'Sam Recruiter','Email Contact Role':'Technical Recruiter',
+              'Email Source':'https://example.com/jobs','Email Evidence':'Public hiring contact','Email Ownership Checked At':now_iso()}
+    updated=apply_reviewed_contact(metadata,reviewed)
+    assert updated['Manager Name']=='Alex Leader' and updated['Email Contact Name']=='Sam Recruiter'
+    assert apply_reviewed_contact(metadata,{**reviewed,'Email Ownership Checked At':'2000-01-01T00:00:00Z'})==metadata

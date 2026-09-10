@@ -217,7 +217,7 @@ def prepare_report(out, rows, coverage, research, summary):
     states = {canonical(d['Job Link']): d for d in draft_state if d.get('Job Link')}
     email_headers = ['Company', 'Job Title', 'To', 'Email Contact', 'Gmail Status', 'Gmail Drafts',
                      'Subject', 'Email Draft', 'LinkedIn Note', 'Manager LinkedIn', 'Email Source',
-                     'Recipient Evidence', 'Approval', 'Job Link']
+                     'Recipient Evidence', 'Approval', 'Job Link', 'Resume Attachment']
     email_rows = []
     from jobagent.outreach.report_drafts import draft_recipient
     for row in shortlist:
@@ -228,7 +228,8 @@ def prepare_report(out, rows, coverage, research, summary):
                            state.get('Status') or ('Awaiting Gmail draft creation' if recipient else 'Pending contact research; Excel only'),
                            state.get('Gmail Draft URL', ''), row.get('Cold Email Subject', ''), row.get('Cold Email', ''),
                            row.get('LinkedIn Note', ''), row.get('Manager LinkedIn', ''), row.get('Email Source', ''),
-                           row.get('Email Evidence', ''), 'Pending user approval; unsent', row['Job Link']])
+                           row.get('Email Evidence', ''), state.get('Approval') or 'Pending user approval; unsent', row['Job Link'],
+                           state.get('Resume Attachment', '')])
     linkedin_headers = ['Name', 'Company', 'JD', 'Source', 'LinkedIn ID', 'LinkedIn Link',
                         'LinkedIn Note', 'LinkedIn Note Length', 'Job Link']
     linkedin_rows = []
@@ -279,6 +280,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     old = read_json(out / 'startup-research.json', {'roles': []})
     company_key = lambda name: re.sub(r'[^a-z0-9]', '', name.casefold())
     by_company = {company_key(r['Company']): r for r in [*seeds['roles'], *old['roles']]}
+    reviewed = read_json(ROOT / cfg['reviewed_contacts_file'], {}) if cfg.get('reviewed_contacts_file') else {}
     urls = [r['url'] for r in discovery.get('results', [])]
     urls += [r['Job Link'] for r in old['roles']]
     urls += read_json(run_dir.parent / 'discovered-boards.json', [])
@@ -324,6 +326,11 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         issues.append({'stage': 'research_provider', 'error': type(exc).__name__})
     facts = candidate_facts(ROOT / 'resume' / 'resume_data.py')
     facts['phone'] = str(cfg.get('signature_phone') or '').strip()
+    resume_path = ROOT / cfg['resume_attachment'] if cfg.get('resume_attachment') else None
+    if resume_path:
+        from jobagent.outreach.report_drafts import load_resume
+        load_resume(resume_path)
+    facts['resume_attached'] = bool(resume_path)
     metadata = {}
     # Previously evidenced startups get first attention; no salary-based bonus.
     focus.sort(key=lambda r: (not bool(by_company.get(company_key(r['Company']), {}).get('Investment Source')),
@@ -335,6 +342,8 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         remaining(deadline)
         progress(f'Researching public leadership and investor evidence: {row["Company"]}')
         metadata[key] = research_company(row, run_dir / 'companies', provider, seed=by_company.get(company_key(key)), deadline=deadline)
+        from jobagent.outreach.daily_research import apply_reviewed_contact
+        metadata[key] = apply_reviewed_contact(metadata[key], reviewed.get(company_key(key)))
         issues += [{'stage': 'company_research', 'company': row['Company'], 'error': e} for e in metadata[key].get('_errors', [])]
     def priority(row):
         meta = metadata.get(row['Company'].casefold(), {})
@@ -383,12 +392,12 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
              f'{summary["postings_seen"]} postings screened for QA titles; {len(focus)} current roles meet the stated minimum experience and geography focus.',
              'No compensation filter. Hyderabad onsite/hybrid and India-eligible remote remain the configured preferences. Singapore requires sponsorship review.',
              'Requirements starting at 4, 5 or 6 years are included; a 5-8-year range is shown exactly. Unstated requirements are a separate review queue.',
-             'Start with the Startup shortlist. Every draft is unsent and pending your approval. One draft per company avoids contacting several leaders about the same hire.',
+             'Start with the Startup shortlist. New drafts require your approval. Confirmed sent messages are labeled separately and are not recreated. One draft per company avoids contacting several leaders about the same hire.',
              'Only outreach with a sourced recipient email becomes a Gmail draft. Outreach with missing contacts stays in Excel for research; historical addresses remain labeled and are not delivery-verified.',
              'The job search and Excel report finish first, then Gmail drafts are saved, then outputs are published to the same Drive folder.',
              'Source Coverage.csv records failures and zero-result boards. All Job Decisions.csv keeps all assessed rejection reasons. Discovery Leads.csv contains unverified external links.',
-             'The scheduled task checks at 06:00 and every 15 minutes until 11:00 IST, plus logon. A persistent ledger and process lock prevent duplicate completed runs; interrupted runs resume checkpoints.',
-             'The computer must be awake, logged in and online within that window. Outside the window it waits for the next morning. Browserbase portal work remains pending separately.', '']
+             'The cloud schedule requests 06:00 IST with 08:30 and 10:30 catch-up triggers. A persistent ledger and process lock prevent duplicate completed runs; interrupted runs resume checkpoints. GitHub may delay triggers.',
+             'Cloud runs do not need the laptop online. Job searches start only within 06:00-11:00 IST. Browserbase portal work remains pending separately.', '']
     (out / 'Research Notes.md').write_text('\n\n'.join(notes), encoding='utf-8')
     # Export public evidence, never candidate contacts, credentials or caches.
     evidence = {k: {'metadata': {f: v for f, v in m.items() if not f.startswith('_')},
@@ -401,8 +410,11 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         progress('Morning step 2: Excel report prepared; now save Gmail drafts for approval.')
         from jobagent.outreach.report_drafts import sync_report_drafts
         try:
-            drafts = sync_report_drafts(out,config.get('drive_output',{}).get('expected_account'),deadline=deadline)
+            drafts = sync_report_drafts(out,config.get('drive_output',{}).get('expected_account'),deadline=deadline,resume_path=resume_path)
             summary['gmail_drafts'] = {status:sum(d['Status']==status for d in drafts) for status in set(d['Status'] for d in drafts)}
+            if any(d['Status'].startswith('Uncertain draft result') for d in drafts):
+                summary['issues'].append({'stage':'gmail_drafts','error':'UncertainDraftResult'})
+                summary['status'] = 'partial'
             augment_manifest(out,['Gmail Draft Status.json'])
         except Exception as exc:
             summary['issues'].append({'stage':'gmail_drafts','error':type(exc).__name__})
@@ -437,7 +449,8 @@ def run_daily(config, profile, out, *, initial=False, now=None, state_dir=STATE,
         try:
             if entry.get("stage") != "prepared":
                 result = work(config, profile, out, run_dir, deadline=deadline, progress=progress)
-                entry.update(stage="prepared", summary=result)
+                retry_drafts = any(i.get('stage') == 'gmail_drafts' for i in result.get('issues', []))
+                entry.update(stage="retry_drafts" if retry_drafts else "prepared", summary=result)
                 atomic_json(ledger_path, ledger)
             if deadline and datetime.now(timezone.utc) >= deadline:
                 entry.update(status="window_ended", finished_at=now_iso())
@@ -445,6 +458,10 @@ def run_daily(config, profile, out, *, initial=False, now=None, state_dir=STATE,
                 return {"status": "window_ended", "date_ist": key}
             progress('Morning step 3: job report and draft stage finished; publish outputs to Drive.')
             publication = publish(out) if publish else None
+            if entry.get('stage') == 'retry_drafts':
+                entry.update(status="partial", finished_at=now_iso(), publication=publication)
+                atomic_json(ledger_path, ledger)
+                return {"status":"partial", "date_ist":key, "summary":entry["summary"], "publication":publication}
             entry.update(status="completed", finished_at=now_iso(), publication=publication)
             atomic_json(ledger_path, ledger)
             return {"status": "completed", "date_ist": key, "summary": entry["summary"], "publication": publication}

@@ -164,11 +164,56 @@ def test_headerless_draft_recovers_after_lost_create_response(tmp_path):
             raise TimeoutError('Saved remotely; response lost')
         return SimpleNamespace(execute=execute)
     service.create=lost_response
-    kwargs={'ledger_path':tmp_path/'ledger.json','service':service}
+    resume=tmp_path/'Resume.pdf';resume.write_bytes(b'%PDF-1.4\nresume fixture\n%%EOF')
+    kwargs={'ledger_path':tmp_path/'ledger.json','service':service,'resume_path':resume}
     assert 'Uncertain' in sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']
     assert decode_draft(service.data['1'])['key']==''
     assert sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']=='Existing draft reused'
     assert service.created==1
+
+
+def test_resume_readback_updates_and_preserves_user_attachments(tmp_path):
+    import hashlib
+    row={'Company':'Example','Job Link':'https://jobs.example/1','Cold Email Subject':'QA opening',
+         'Cold Email':"Hi Alex,\nI've attached my resume.",'Public Work Email':'alex@example.com',
+         'Email Source':'https://example.com/team','Email Evidence':'Public hiring contact'}
+    with (tmp_path/'Startup Outreach.csv').open('w',newline='',encoding='utf-8') as f:
+        writer=csv.DictWriter(f,fieldnames=list(row));writer.writeheader();writer.writerow(row)
+    service=FakeGmail();kwargs={'ledger_path':tmp_path/'ledger.json','service':service}
+    assert 'Withheld' in sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']
+    assert service.created==0
+    resume=tmp_path/'Resume.pdf';resume.write_bytes(b'%PDF-1.4\nresume one\n%%EOF')
+    kwargs['resume_path']=resume
+    result=sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]
+    assert result['Status']=='Created and read back' and result['Resume Attachment']=='Resume.pdf'
+    decoded=decode_draft(service.data['1'])
+    assert decoded['attachments']==[{'filename':'Resume.pdf','mime_type':'application/pdf','sha256':hashlib.sha256(resume.read_bytes()).hexdigest()}]
+    assert sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']=='Existing draft reused'
+    resume.write_bytes(b'%PDF-1.4\nresume two\n%%EOF')
+    assert sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']=='Updated and read back'
+    decoded=decode_draft(service.data['1'])
+    message=EmailMessage();message['To']=decoded['to'];message['Subject']=decoded['subject'];message.set_content(decoded['body'])
+    message.add_attachment(b'Personal notes',maintype='text',subtype='plain',filename='My-notes.txt')
+    service.data['1']['message']['raw']=base64.urlsafe_b64encode(message.as_bytes()).decode()
+    result=sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]
+    assert 'preserved' in result['Status'] and result['Resume Attachment']=='My-notes.txt'
+    assert service.created==1 and service.updated==1
+
+
+def test_confirmed_sent_contact_never_recreated(tmp_path):
+    import hashlib,json
+    row={'Company':'Example','Job Link':'https://jobs.example/1','Cold Email Subject':'QA opening',
+         'Cold Email':"Hi Alex, I've attached my resume.",'Public Work Email':'alex@example.com',
+         'Email Source':'https://example.com/team','Email Evidence':'Public hiring contact'}
+    with (tmp_path/'Startup Outreach.csv').open('w',newline='',encoding='utf-8') as f:
+        writer=csv.DictWriter(f,fieldnames=list(row));writer.writeheader();writer.writerow(row)
+    key=hashlib.sha256(b'example').hexdigest()[:24]
+    ledger=tmp_path/'ledger.json';ledger.write_text(json.dumps({key:{'state':'sent','sent_to':'alex@example.com','sent_at':'2026-09-10T02:24:51Z'}}))
+    service=FakeGmail()
+    result=sync_report_drafts(tmp_path,'candidate@example.com',ledger_path=ledger,service=service,recreate_missing=True)[0]
+    assert result['Status']=='Already sent; no duplicate draft created'
+    assert result['Approval']=='Already sent; no new sending action'
+    assert service.created==0 and service.updated==0
 
 
 @pytest.mark.parametrize('changes',[

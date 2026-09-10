@@ -57,3 +57,4 @@ __pycache__/
 .claude/settings.local.json
 gmail_report_drafts.json
 gmail_report_drafts.lock
+.jobagent-state.enc

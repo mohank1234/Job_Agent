@@ -21,7 +21,7 @@ from jobagent.outreach.service import recent
 from jobagent.outreach.verification import canonical, get_public
 from jobagent.models import clean_html
 
-STYLE_VERSION = 6
+STYLE_VERSION = 7
 EMAIL = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])", re.I)
 BROKERS = ('rocketreach', 'apollo.io', 'contactout', 'signalhire', 'leadiq', 'zoominfo', 'lusha', 'wiza.co')
 META = ['Startup Priority', 'Investor Backing', 'YC Batch', 'Investment Source',
@@ -70,6 +70,16 @@ def candidate_facts(path):
 def remaining(deadline):
     if deadline and datetime.now(timezone.utc) >= deadline:
         raise TimeoutError('Morning window ended')
+
+
+def apply_reviewed_contact(metadata, reviewed):
+    """Keep separately reviewed email contacts when cached research is resumed."""
+    from jobagent.outreach.report_drafts import draft_recipient
+    if not reviewed or not recent(reviewed.get('Email Ownership Checked At'), max_age_days=30) or not draft_recipient(reviewed):
+        return metadata
+    fields = ('Public Work Email', 'Email Source', 'Email Evidence', 'Email Contact Name',
+              'Email Contact Role', 'Email Contact LinkedIn', 'Email Ownership Status', 'Email Ownership Checked At')
+    return {**metadata, **{k:reviewed.get(k, '') for k in fields}}
 
 
 def valid_source(sources, url, quote):
@@ -228,6 +238,50 @@ def brief_experience(row, facts):
     return ('I have ' + years[1] + ' years of QA experience.' if years else 'I work in software quality assurance.')
 
 
+def recipient_template(row, metadata, facts, company):
+    """Use the user's advertised-opening templates, matched to the email contact."""
+    title = row['Job Title'].strip()
+    contact = metadata.get('Email Contact Name') or metadata.get('Manager Name') or f'{company} team'
+    name = contact.split()[0] if metadata.get('Email Contact Name') or metadata.get('Manager Name') else contact
+    role = (metadata.get('Email Contact Role') if metadata.get('Email Contact Name') else metadata.get('Manager Role')) or ''
+    attached = facts.get('resume_attached', False)
+    experience = brief_experience(row, facts)
+    hope = "Hope you're doing well."
+    if re.search(r'\b(?:ceo|chief executive|founder|co-founder)\b', role, re.I):
+        template = '1 - CEO, existing opening'
+        subject = f'Interested in the {title} opening at {company}'
+        intro = f'I noticed the {title} opening at {company}. {experience}'
+        ask = 'Would you be open to sharing my attached resume with the person handling this role?' if attached else 'Would you be open to connecting me with the person handling this role? I would be happy to share my resume.'
+    elif re.search(r'\b(?:qa|quality)\b', role, re.I) and re.search(r'manager|head|director|lead', role, re.I):
+        template = '5 - QA manager, relevant experience'
+        subject = f'Interested in joining your QA team at {company}'
+        intro = f"I'm interested in the {title} role at {company}. {experience}"
+        ask = 'Would you be open to reviewing my attached resume?' if attached else 'Would you be open to reviewing my resume? I would be happy to share it.'
+    elif re.search(r'\b(?:vp|vice president|director)\b', role, re.I):
+        template = '8 - Director or VP, advertised role'
+        subject = f'Interest in {title} at {company}'
+        job_id = str(row.get('Job ID') or '')
+        if re.fullmatch(r'[A-Za-z0-9_-]{1,80}', job_id):
+            subject += ' - ' + job_id
+        intro = f'I came across the {title} opening at {company}. {experience}'
+        ask = 'Would you be open to passing my attached resume to the hiring manager?' if attached else 'Could you connect me with the hiring manager? I would be happy to share my resume.'
+    elif re.search(r'recruit|talent|hiring manager|engineering manager', role, re.I):
+        template = '3 - Hiring contact, direct application'
+        subject = f'Application for {title} - {facts["name"]}'
+        hope = "Hope you're having a good week."
+        intro = f'I saw the {title} opening at {company}. {experience}'
+        ask = "I've attached my resume and would appreciate a chance to discuss the role." if attached else 'I would be happy to share my resume and discuss the role.'
+    else:
+        template = '4 - Technical leader, asking about an opening'
+        subject = f'QA opening on your team at {company}'
+        intro = f'I noticed {company} is hiring for {title}. {experience}'
+        ask = "Is this opening on your team? I've attached my resume and would appreciate being connected with the right person." if attached else 'Is this opening on your team? I would be happy to share my resume and would appreciate being connected with the right person.'
+    body = f'Hi {name},\n{hope}\n\n{intro}\n\n{ask}\n\nThanks & regards,\n{facts["name"]}'
+    if facts.get('phone'):
+        body += '\n' + str(facts['phone']).strip()
+    return subject, body, template
+
+
 def grounded_draft(row, metadata, facts):
     """Compose from actual resume bullets; no model-generated career claims."""
     tokens = set(re.findall(r'[a-z][a-z0-9+]{2,}', row['JD Text'].lower()))
@@ -251,19 +305,13 @@ def grounded_draft(row, metadata, facts):
     }.get(row['Company'].casefold(), row['Company'])
     title = row['Job Title'].strip()
     name = metadata.get('Manager Name', '').split(' ')[0] or f'{company} team'
-    email_name = (metadata.get('Email Contact Name') or metadata.get('Manager Name') or f'{company} team').split(' ')[0]
     # A short verbatim employer clause makes the role-specific reference
     # inspectable and does not claim candidate proficiency in those skills.
     sentences = [s.strip(' -\t') for s in re.split(r'\n|(?<=[.!?])\s+', row['JD Text'])]
     tasks = [s for s in sentences if 35 <= len(s) <= 185 and re.search(r'\b(build|design|own|develop|test|evaluate|implement|automate|maintain)\b', s, re.I)
              and not re.search(r'applicant|race|religion|veteran|equal opportunity|disability|compensation|benefits', s, re.I)]
     task = max(tasks, key=score) if tasks else ''
-    body = (f"Hi {email_name},\n\nI'm reaching out about the {title} role at {company}. "
-            + brief_experience(row, facts)
-            + "\n\nI'd like to learn more about the opportunity. Would you be open to a quick chat, or could you connect me with the hiring team?\n\n"
-            f'Thanks,\n{facts["name"]}')
-    if facts.get('phone'):
-        body += '\n' + str(facts['phone']).strip()
+    subject, body, template = recipient_template(row, metadata, facts, company)
     relevant = [s for s in ('API testing', 'Selenium', 'SQL', 'Jenkins', 'Docker', 'LLM evaluation', 'computer vision testing')
                 if set(s.lower().split()) & tokens and s.split()[0].lower() in ' '.join(bullets).lower()]
     evidence = ', '.join(relevant[:2]) or 'QA automation and API testing'
@@ -272,7 +320,7 @@ def grounded_draft(row, metadata, facts):
         note = f'Hi {name}, I saw your QA opening at {company}. My work covers {evidence}. I would like to learn more about the team. Open to connecting?'
     if len(note) > 300:
         note = f'Hi, I saw your QA opening. My work covers {evidence}. I would like to learn more about the team. Open to connecting?'
-    return {'Cold Email Subject': f'{title} at {company}', 'Cold Email': body,
+    return {'Cold Email Subject': subject, 'Cold Email': body, 'Email Template': template,
             'LinkedIn Note': note, 'Approval Status': 'Pending user approval; do not send',
             'Draft Generation': 'Composed from exact resume evidence and current JD; unsent',
             'Why This Role': task or row.get('Impact Evidence', ''),
@@ -281,7 +329,7 @@ def grounded_draft(row, metadata, facts):
 
 def cached_draft(row, metadata, facts, cache_dir):
     key = fingerprint({'job': canonical(row['Job Link']), 'jd': row['JD SHA256'],
-                       'recipient': [metadata.get(k, '') for k in ('Manager Name', 'Manager LinkedIn', 'Public Work Email', 'Email Contact Name', 'Company Display Name')],
+                       'recipient': [metadata.get(k, '') for k in ('Manager Name', 'Manager Role', 'Manager LinkedIn', 'Public Work Email', 'Email Contact Name', 'Email Contact Role', 'Company Display Name')],
                        'facts': facts, 'style': STYLE_VERSION})
     path = Path(cache_dir) / (key + '.json')
     if path.exists():

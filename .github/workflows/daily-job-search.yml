@@ -12,7 +12,7 @@ name: Daily job search
 # or no-op via the ledger in research/morning-private/.
 on:
   schedule:
-    - cron: '0 1 * * *'   # 06:30 IST - primary run
+    - cron: '30 0 * * *'  # 06:00 IST - primary run
     - cron: '0 3 * * *'   # 08:30 IST - catch-up if the primary run failed/skipped
     - cron: '0 5 * * *'   # 10:30 IST - last-chance catch-up before the window closes
   workflow_dispatch: {}    # manual "Run workflow" button for on-demand runs
@@ -38,7 +38,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore persistent state (jobs.db, ledgers, checkpoints)
+      - name: Restore encrypted persistent state
+        uses: actions/cache/restore@v4
+        with:
+          path: .jobagent-state.enc
+          key: jobagent-private-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            jobagent-private-v1-
+
+      - name: Restore legacy state during migration
+        if: hashFiles('.jobagent-state.enc') == ''
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -50,6 +59,11 @@ jobs:
           key: jobagent-state-${{ github.run_id }}
           restore-keys: |
             jobagent-state-
+
+      - name: Decrypt checkpoint
+        env:
+          JOBAGENT_STATE_KEY: ${{ secrets.JOBAGENT_STATE_KEY }}
+        run: python -m jobagent.cloud_state restore
 
       - name: Write credentials and config from secrets
         env:
@@ -69,6 +83,13 @@ jobs:
           printf '%s' "$GMAIL_TOKEN_JSON" > token.json
           printf '%s' "$DRIVE_TOKEN_JSON" > drive_token.json
 
+      - name: Validate setup and adopt reviewed state
+        id: prepared
+        env:
+          JOBAGENT_STATE_BOOTSTRAP_JSON: ${{ secrets.JOBAGENT_STATE_BOOTSTRAP_JSON }}
+          JOBAGENT_REVIEWED_CONTACTS_JSON: ${{ secrets.JOBAGENT_REVIEWED_CONTACTS_JSON }}
+        run: python -m jobagent.cloud_state prepare
+
       - name: Run morning pipeline
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -84,42 +105,22 @@ jobs:
           # and not a failure - the next scheduled trigger resumes from the
           # checkpoint.
           #
-          # DriveOutputError ("unrecognized edits") is jobagent/drive_output.py
-          # deliberately refusing to overwrite edits it doesn't recognize (e.g.
-          # you filled in the application tracker tab yourself) - the search,
-          # scoring and Gmail drafts already completed by this point, only the
-          # Drive publish step declined. That is the safeguard working as
-          # designed, not a pipeline defect, so it should not turn the whole
-          # day red - review the report in Drive by hand instead.
-          #
-          # Anything else is a real failure.
+          # Publication failures remain visible and resumable. Do not report
+          # success when the user's Drive report was not updated.
           if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then
-            if grep -q "DriveOutputError" morning-run.log; then
-              echo "::warning::Drive publish was skipped - it found edits it didn't recognize and stopped rather than overwrite them. Everything else (search, scoring, Gmail drafts) completed. Review the report in Drive, then re-run."
-            else
-              exit "$code"
-            fi
+            exit "$code"
           fi
 
-      - name: Save persistent state for next run
-        if: always()
+      - name: Encrypt persistent state
+        id: encrypted
+        if: always() && steps.prepared.outcome == 'success'
+        env:
+          JOBAGENT_STATE_KEY: ${{ secrets.JOBAGENT_STATE_KEY }}
+        run: python -m jobagent.cloud_state save
+
+      - name: Save encrypted state for next run
+        if: always() && steps.encrypted.outcome == 'success'
         uses: actions/cache/save@v4
         with:
-          path: |
-            jobs.db
-            drive_output_state.json
-            outreach_draft_ledger.json
-            gmail_report_drafts.json
-            research/
-          key: jobagent-state-${{ github.run_id }}
-
-      - name: Upload logs and digest for review
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: job-agent-run-${{ github.run_id }}
-          path: |
-            digest_*.md
-            research/morning-private/
-          if-no-files-found: ignore
-          retention-days: 14
+          path: .jobagent-state.enc
+          key: jobagent-private-v1-${{ github.run_id }}-${{ github.run_attempt }}

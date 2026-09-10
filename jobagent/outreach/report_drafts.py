@@ -17,16 +17,45 @@ ROOT = Path(__file__).resolve().parents[2]
 LEDGER = ROOT / 'gmail_report_drafts.json'
 
 
-def content_hash(subject, body, to=''):
-    return hashlib.sha256((to+'\n'+subject+'\n'+body.strip()).encode()).hexdigest()
+def content_hash(subject, body, to='', attachments=()):
+    value = to+'\n'+subject+'\n'+body.strip()
+    if attachments:
+        value += '\nattachments\n' + json.dumps(sorted(attachments, key=lambda a: (a['filename'], a['sha256'])), sort_keys=True)
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def load_resume(path):
+    """Read the configured resume once; accept only a bounded PDF or DOCX."""
+    path = Path(path)
+    mime = {'.pdf':'application/pdf', '.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}.get(path.suffix.lower())
+    if not mime or not path.is_file() or not 0 < path.stat().st_size <= 5 * 1024 * 1024:
+        raise ValueError('Resume attachment must be an existing PDF or DOCX up to 5 MB')
+    data = path.read_bytes()
+    if path.suffix.lower() == '.pdf' and not data.startswith(b'%PDF-'):
+        raise ValueError('Resume PDF content is invalid')
+    if path.suffix.lower() == '.docx':
+        import io
+        import zipfile
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as doc:
+                if 'word/document.xml' not in doc.namelist():
+                    raise ValueError('Resume DOCX content is invalid')
+        except zipfile.BadZipFile as exc:
+            raise ValueError('Resume DOCX content is invalid') from exc
+    return data, {'filename':path.name, 'mime_type':mime, 'sha256':hashlib.sha256(data).hexdigest()}
 
 
 def decode_draft(draft):
     raw = base64.urlsafe_b64decode(draft['message']['raw'])
     message = BytesParser(policy=policy.default).parsebytes(raw)
-    body = message.get_body(preferencelist=('plain',)).get_content() if message.is_multipart() else message.get_content()
+    body_part = message.get_body(preferencelist=('plain',))
+    body = body_part.get_content() if body_part else ''
+    attachments = [{'filename':part.get_filename() or '', 'mime_type':part.get_content_type(),
+                    'sha256':hashlib.sha256(part.get_payload(decode=True) or b'').hexdigest()}
+                   for part in message.walk() if not part.is_multipart()
+                   and (part.get_filename() or part.get_content_disposition() == 'attachment')]
     return {'key':message.get('X-JobAgent-Draft-Key',''), 'subject':str(message.get('Subject','')),
-            'to':str(message.get('To','')), 'body':body.replace('\r\n','\n').strip()}
+            'to':str(message.get('To','')), 'body':body.replace('\r\n','\n').strip(), 'attachments':attachments}
 
 
 def draft_recipient(row):
@@ -45,9 +74,11 @@ def draft_recipient(row):
     return ''
 
 
-def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None, deadline=None, recreate_missing=False):
+def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None, deadline=None, recreate_missing=False, resume_path=None):
     if not expected_sender:
         raise ValueError('Expected Gmail account is required')
+    resume_data, resume_meta = load_resume(resume_path) if resume_path else (None, None)
+    attachments = [resume_meta] if resume_meta else []
     if service is None:
         from googleapiclient.discovery import build
         creds = authenticate(required_scopes=['https://www.googleapis.com/auth/gmail.compose'])
@@ -85,7 +116,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
             decoded = decode_draft(draft)
             subjects.add(decoded['subject'])
             key = decoded['key'] or keys_by_id.get(draft['id']) or pending_hashes.get(
-                content_hash(decoded['subject'], decoded['body'], decoded['to']))
+                content_hash(decoded['subject'], decoded['body'], decoded['to'], decoded['attachments']))
             if key:
                 owned[key] = (draft,decoded)
         for row in rows:
@@ -98,23 +129,36 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 raise ValueError('Invalid draft subject')
             # Draft prefilling does not confirm current ownership or authorize sending.
             to = draft_recipient(row)
-            desired_hash = content_hash(subject,body,to)
+            desired_hash = content_hash(subject,body,to,attachments)
             entry = ledger.get(key,{})
             result = {'Company':row['Company'],'Job Link':row['Job Link'],'Status':'',
                       'Gmail Draft URL':'','Recipient':to or 'Public email not available; To left blank',
                       'Email Ownership Status':row.get('Email Ownership Status') or 'unconfirmed',
                       'Email Source':row.get('Email Source',''),
                       'Email Contact':row.get('Email Contact Name') or row.get('Manager Name',''),
+                      'Resume Attachment':'',
                       'Recipient Review':'Review public source and current ownership before sending' if to else 'Find a public work email before sending',
                       'Approval':'Pending user approval; unsent'}
+            if entry.get('state') == 'sent':
+                result.update(Status='Already sent; no duplicate draft created', Recipient=entry.get('sent_to') or to,
+                              Approval='Already sent; no new sending action',
+                              **{'Sent At':entry.get('sent_at',''), 'Sent Message URL':entry.get('sent_message_url','')})
+                results.append(result)
+                continue
             if not to:
                 result.update(Status='Pending contact research; saved in Excel only', Recipient='')
                 results.append(result)
                 continue
+            if not resume_meta and re.search(r'\b(?:attached\s+(?:my\s+)?resume|resume\s+is\s+attached)\b', body, re.I):
+                result['Status'] = 'Withheld: email mentions an attachment but no resume is configured'
+                results.append(result)
+                continue
             current = owned.get(key)
+            actual_attachments = []
             if current:
                 draft, decoded = current
-                actual_hash = content_hash(decoded['subject'],decoded['body'],decoded['to'])
+                actual_attachments = decoded['attachments']
+                actual_hash = content_hash(decoded['subject'],decoded['body'],decoded['to'],actual_attachments)
                 if actual_hash == desired_hash:
                     entry.update(state='drafted',draft_id=draft['id'],content_hash=actual_hash)
                     result['Status'] = 'Existing draft reused'
@@ -139,6 +183,9 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 if to:
                     message['To'] = to
                 message.set_content(body)
+                if resume_meta:
+                    maintype, subtype = resume_meta['mime_type'].split('/', 1)
+                    message.add_attachment(resume_data, maintype=maintype, subtype=subtype, filename=resume_meta['filename'])
                 payload = {'message':{'raw':base64.urlsafe_b64encode(message.as_bytes()).decode()}}
                 updating = result['Status'] == 'Update needed'
                 if entry.get('draft_id') and not updating:
@@ -150,8 +197,9 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 try:
                     saved = api.update(userId='me',id=current[0]['id'],body=payload).execute() if updating else api.create(userId='me',body=payload).execute()
                     decoded = decode_draft(api.get(userId='me',id=saved['id'],format='raw').execute())
-                    if content_hash(decoded['subject'],decoded['body'],decoded['to']) != desired_hash:
+                    if content_hash(decoded['subject'],decoded['body'],decoded['to'],decoded['attachments']) != desired_hash:
                         raise ValueError('Draft read-back differs')
+                    actual_attachments = decoded['attachments']
                     entry.update(state='drafted',draft_id=saved['id'],content_hash=desired_hash,verified_at=now_iso())
                     result['Status'] = 'Updated and read back' if updating else 'Created and read back'
                 except Exception as exc:
@@ -159,6 +207,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                     result['Status'] = 'Uncertain draft result; no automatic duplicate retry'
             if current or entry.get('draft_id'):
                 result['Gmail Draft URL'] = 'https://mail.google.com/mail/u/0/#drafts'
+            result['Resume Attachment'] = '; '.join(a['filename'] for a in actual_attachments)
             ledger[key] = entry
             atomic_json(ledger_path,ledger)
             results.append(result)

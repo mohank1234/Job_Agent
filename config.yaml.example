@@ -25,6 +25,8 @@ morning:
   max_drafts: 25
   gmail_drafts: false  # Enable after Gmail compose consent for the expected account.
   signature_phone: ""  # Optional phone placed on the line after your name in email drafts.
+  resume_attachment: ""  # Path to your PDF or DOCX resume; attached to each Gmail draft.
+  reviewed_contacts_file: ""  # Optional private JSON containing dated, sourced email contacts by company.
   approval_required: true
   discovery_queries:
     - 'YC venture backed startup QA SDET 4 5 6 years India remote Hyderabad jobs'

@@ -880,7 +880,7 @@ def cmd_morning(args):
                        work=daily_work, publish=publish, preflight=preflight, progress=console.print)
     RUN_DETAILS.update(result)
     console.print(json.dumps(result, indent=2))
-    return 2 if result.get('status') == 'window_ended' else 0
+    return 2 if result.get('status') == 'window_ended' else (1 if result.get('status') == 'partial' else 0)
 
 
 def cmd_rescore(args) -> None:
