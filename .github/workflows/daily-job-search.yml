@@ -77,14 +77,28 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: |
           set +e
-          python run.py morning
-          code=$?
+          python run.py morning 2>&1 | tee morning-run.log
+          code=${PIPESTATUS[0]}
           set -e
           # 2 = "window_ended": the 11:00 IST deadline hit mid-run. Expected
           # and not a failure - the next scheduled trigger resumes from the
-          # checkpoint. Anything else is a real failure.
+          # checkpoint.
+          #
+          # DriveOutputError ("unrecognized edits") is jobagent/drive_output.py
+          # deliberately refusing to overwrite edits it doesn't recognize (e.g.
+          # you filled in the application tracker tab yourself) - the search,
+          # scoring and Gmail drafts already completed by this point, only the
+          # Drive publish step declined. That is the safeguard working as
+          # designed, not a pipeline defect, so it should not turn the whole
+          # day red - review the report in Drive by hand instead.
+          #
+          # Anything else is a real failure.
           if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then
-            exit "$code"
+            if grep -q "DriveOutputError" morning-run.log; then
+              echo "::warning::Drive publish was skipped - it found edits it didn't recognize and stopped rather than overwrite them. Everything else (search, scoring, Gmail drafts) completed. Review the report in Drive, then re-run."
+            else
+              exit "$code"
+            fi
           fi
 
       - name: Save persistent state for next run
