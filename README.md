@@ -10,11 +10,47 @@ not "which jobs contain my keywords?".
 
 ## Verified jobs in Google Drive
 
+`python run.py morning` runs the daily public-board search, public contact
+research and unsent outreach, then publishes to the same Drive folder. Run
+`Install-Report-Schedule.ps1` to install a 06:00 IST task with checks every
+15 minutes until 11:00 and at logon. The computer must be awake, logged in and
+online. A process lock, daily ledger and saved checkpoints prevent duplicate
+completed runs and resume interrupted work. Outside the window it does nothing;
+`--initial` is for an explicitly authorized setup run only.
+
+The morning workflow uses the configured research model (currently Gemini),
+and composes outreach from actual resume bullets and the current JD. It never
+sends messages. All drafts require user approval; LinkedIn notes are at most
+300 characters. Compensation is not a selection criterion. Postings with a
+stated minimum of 4, 5 or 6 years get priority; unstated experience needs review.
+Source Coverage.csv distinguishes employer boards from ATS vendors and records
+failures. All Job Decisions.csv preserves rejection reasons, and Discovery
+Leads.csv keeps external links explicitly unverified. Public emails remain blank
+when unsupported; historical addresses and uncertain affiliations are labeled.
+
+With `morning.gmail_drafts: true`, the morning task finishes the job search and
+Excel report, then saves Gmail drafts, then publishes the outputs to Drive.
+Only outreach with an exact publicly sourced email is saved as a Gmail draft,
+with `To` filled. Missing contacts stay in the workbook's **Email drafts** tab
+as pending research. Recruiting contacts are recorded separately from senior
+managers, so the email greeting matches its recipient. Public records do not confirm current ownership or
+authorize sending. Set `morning.signature_phone` in your local `config.yaml`
+to add your phone number on the line after your name in email drafts. The
+emails use short plain text, with no watermark, logo, generated-by footer, or
+custom Job Agent tracking header. The
+draft ledger prevents duplicates, preserves user edits, and does not recreate
+missing drafts that might have been sent or deleted. No message is sent.
+Identical employer/title/JD listings are grouped, retaining their source links
+and location variants. Framework requirements are checked against resume
+evidence before a role is marked ready for review.
+
 `python run.py refresh-report --publish` fetches current full descriptions from
 supported ATS boards, compares them with the profile, and updates a permanent
 Google Sheet inside **JobAgent Output**. The same folder contains the CSV,
 source evidence, run status, resume and outreach deliverables listed in the
-output manifest. An optional application tracker preserves user entries and
+output manifest when full publication is enabled. With
+`drive_output.main_files_only: true`, Drive contains only the Google Sheet,
+Excel download, and resume; supporting files stay local. An optional application tracker preserves user entries and
 is not recreated after deletion. The publisher
 reads uploaded files back before recording success. See [DRIVE_OUTPUT.md](DRIVE_OUTPUT.md).
 

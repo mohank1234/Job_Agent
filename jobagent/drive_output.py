@@ -282,7 +282,7 @@ class Publisher:
         self.save()
         return meta["id"]
 
-    def publish(self, out, folder_name="JobAgent Output"):
+    def publish(self, out, folder_name="JobAgent Output", *, main_files_only=False):
         out = Path(out)
         # Validate the complete local bundle before creating any remote files.
         summary = json.loads((out / "verification.json").read_text(encoding="utf-8"))
@@ -294,17 +294,19 @@ class Publisher:
                 raise DriveOutputError(f"Report bundle is missing {name}")
         workbook_digest((out / "JobAgent Report.xlsx").read_bytes())
         extras = deliverable_files(out)
+        if main_files_only:
+            extras = [(p, r, m) for p, r, m in extras if 'resume' in p.name.casefold() and p.suffix.lower() in ('.docx', '.pdf')]
         folder = self.ensure_folder(folder_name)
         sheet = self.put_sheet(out / "JobAgent Report.xlsx", folder)
         files = {"report": sheet}
-        for name, role, mime in [("verified.csv", "csv", "text/csv"),
+        for name, role, mime in ([] if main_files_only else [("verified.csv", "csv", "text/csv"),
                                  ("evidence.md", "evidence", "text/markdown"),
-                                 ("verification.json", "status", "application/json")]:
+                                 ("verification.json", "status", "application/json")]):
             files[role] = self.put_file(out / name, role, mime, folder)
         files["report_xlsx"] = self.put_file(out / "JobAgent Report.xlsx", "report_xlsx", XLSX_MIME, folder)
         for path, role, mime in extras:
             files[role] = self.put_file(path, role, mime, folder)
-        tracker = self.ensure_tracker(folder)
+        tracker = None if main_files_only else self.ensure_tracker(folder)
         if tracker:
             files["application_tracker"] = tracker
         result = {"status": "published_and_read_back", "verified_at": now_iso(),
@@ -312,17 +314,19 @@ class Publisher:
                   "folder_url": f"https://drive.google.com/drive/folders/{folder}",
                   "sheet_url": f"https://docs.google.com/spreadsheets/d/{sheet}/edit",
                   "tracker_url": f"https://docs.google.com/spreadsheets/d/{tracker}/edit" if tracker else None,
-                  "tracker_status": "available" if tracker else "trashed; user deletion preserved", "files": files}
+                  "tracker_status": "omitted in main-files mode" if main_files_only else "available" if tracker else "trashed; user deletion preserved", "files": files,
+                  "main_files_only": main_files_only}
         atomic_json(out / "publication.json", result)
         # The receipt lists the verified deliverables; it does not recursively
         # include its own digest. Read-back still validates the receipt upload.
-        self.put_file(out / "publication.json", "publication_receipt", "application/json", folder)
+        if not main_files_only:
+            self.put_file(out / "publication.json", "publication_receipt", "application/json", folder)
         self.state["last_publish"] = result
         self.save()
         return result
 
 
-def publish_report(out, expected_account, folder_name="JobAgent Output"):
+def publish_report(out, expected_account, folder_name="JobAgent Output", *, main_files_only=False):
     drive = authenticate_drive(expected_account)
     with process_lock(STATE_PATH.with_suffix(".lock")):
-        return Publisher(drive).publish(out, folder_name)
+        return Publisher(drive).publish(out, folder_name, main_files_only=main_files_only)

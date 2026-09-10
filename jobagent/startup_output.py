@@ -19,9 +19,12 @@ RESEARCH_FIELDS = [
     "Email Source", "Other Public Contact", "Other Contact Evidence",
     "Why This Role", "Requirements To Confirm", "Draft Status", "Cold Email Subject",
     "Cold Email", "LinkedIn Note", "LinkedIn Note Characters",
+    "Approval Status", "Draft Generation", "Contact Status", "Backing Status",
+    "Email Ownership Status", "Email Ownership Checked At",
+    "Email Contact Name", "Email Contact Role", "Email Contact LinkedIn", "Company Display Name",
 ]
 SHORTLIST_FIELDS = ["Company", "Job Title", "Location", "Job Link", "JD Text",
-                    "Fit Status", "Fit Notes", *RESEARCH_FIELDS,
+                    "Fit Status", "Fit Notes", "Framework Review", "Duplicate Listing URLs", *RESEARCH_FIELDS,
                     "JD Verified At", "JD Source URL", "JD SHA256"]
 
 
@@ -42,7 +45,7 @@ def load_research(out):
             raise ValueError("LinkedIn note exceeds 300 characters")
         if role.get("Public Work Email") and not (role.get("Email Source") and role.get("Email Evidence")):
             raise ValueError("Public work email requires source and evidence classification")
-        if not role.get("Investment Source") or not role.get("Manager Source"):
+        if (role.get("Investor Backing") and not role.get("Investment Source")) or (role.get("Manager Name") and not role.get("Manager Source")):
             raise ValueError("Startup and manager claims require source links")
     return data
 
@@ -52,10 +55,22 @@ def research_leads(out):
             for r in load_research(out)["roles"]]
 
 
+def unique_notes(*values):
+    seen, result = set(), []
+    for value in values:
+        for note in value.split(';'):
+            note = note.strip()
+            if note and note.casefold() not in seen:
+                seen.add(note.casefold())
+                result.append(note)
+    return '; '.join(result)
+
+
 def enrich_rows(rows, research):
     lookup = {canonical(r["Job Link"]): r for r in research["roles"]}
     shortlist = []
     for row in rows:
+        row['Fit Notes'] = unique_notes(row.get('Fit Notes', ''))
         # Previous exports are also discovery inputs. Do not retain stale drafts.
         for field in RESEARCH_FIELDS:
             row.pop(field, None)
@@ -82,7 +97,7 @@ def enrich_rows(rows, research):
             if entry.get("Requires Fit Review") and row.get("Fit Status") == "in_scope":
                 row["Fit Status"] = "needs_review"
             if entry.get("Requirements To Confirm"):
-                row["Fit Notes"] = (row.get("Fit Notes", "") + "; " + entry["Requirements To Confirm"]).strip("; ")
+                row["Fit Notes"] = unique_notes(row.get('Fit Notes', ''), entry['Requirements To Confirm'])
         row["LinkedIn Note Characters"] = str(len(row.get("LinkedIn Note", "")))
         shortlist.append(row)
     order = {canonical(r["Job Link"]): n for n, r in enumerate(research["roles"])}

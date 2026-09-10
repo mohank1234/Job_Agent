@@ -252,6 +252,8 @@ class Profile:
             f"seeking {prefs.get('min_ctc_lpa','?')}-{prefs.get('target_ctc_lpa','?')} LPA "
             f"(will not move below {prefs.get('min_ctc_lpa','?')} LPA)"
         )
+        if prefs.get("compensation_filter_enabled") is False:
+            pay = "Compensation is not a selection criterion. Do not filter, penalize or rank jobs by pay."
         block = [
             "CANDIDATE PROFILE",
             f"Headline: {self.headline}",
@@ -263,6 +265,9 @@ class Profile:
         ]
         if self.visa_note:
             block.append(f"Work authorisation: {self.visa_note}")
+        if self.experience.get("target_minimum_years"):
+            low, high = self.experience["target_minimum_years"]
+            block.append(f"Target postings with a stated minimum of {low}-{high} years of relevant experience; do not invent missing requirements.")
         block += ["", self.summary, "",
                   f"Known gaps (do not invent these): {', '.join(self.gaps[:14])}"]
         return "\n".join(block) + "\n"

@@ -667,7 +667,7 @@ def singapore_eligibility(job: Job, profile: Profile) -> tuple[str, str | None]:
     if RE_SG_SPONSORS.search(text):
         return "sponsors", None
 
-    m = RE_SG_SALARY_FLOOR.search(text)
+    m = RE_SG_SALARY_FLOOR.search(text) if profile.preferences.get("compensation_filter_enabled") is not False else None
     if m:
         if m.group(1).lower() == "below":
             return "below_floor", (

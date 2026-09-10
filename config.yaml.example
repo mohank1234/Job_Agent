@@ -17,6 +17,20 @@
 
 profile_file: profile.yaml
 
+# Public employer-board scan and outreach drafts; never sends messages.
+morning:
+  workers: 6
+  max_report_rows: 1000
+  max_company_research: 15
+  max_drafts: 25
+  gmail_drafts: false  # Enable after Gmail compose consent for the expected account.
+  signature_phone: ""  # Optional phone placed on the line after your name in email drafts.
+  approval_required: true
+  discovery_queries:
+    - 'YC venture backed startup QA SDET 4 5 6 years India remote Hyderabad jobs'
+    - 'site:jobs.ashbyhq.com QA automation engineer India remote 4 6 years'
+    - 'site:jobs.lever.co OR site:job-boards.greenhouse.io SDET India remote startup 5 years'
+
 llm:
   # PROVIDER. Researched and benchmarked 2026-08-20 for THIS workload
   # (~10 calls/day, ~5-8k tokens per 4-job batch):
@@ -291,6 +305,7 @@ outreach:
 drive_output:
   expected_account: ""       # Google account in which output should be created
   folder_name: "JobAgent Output"
+  main_files_only: true  # Google Sheet, Excel download, and resume; supporting evidence stays local.
   discovery_queries:         # used only with explicit refresh-report --discover
     - "QA Engineer SDET Playwright Selenium remote India hiring"
     - "AI QA Engineer LLM evaluation SDET Hyderabad India hiring"

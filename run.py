@@ -824,7 +824,7 @@ def cmd_drive_auth(args):
 def cmd_publish_report(args):
     from jobagent.drive_output import publish_report
     cfg = load_yaml("config.yaml").get("drive_output", {})
-    result = publish_report(Path(args.out), cfg.get("expected_account"), cfg.get("folder_name", "JobAgent Output"))
+    result = publish_report(Path(args.out), cfg.get("expected_account"), cfg.get("folder_name", "JobAgent Output"), main_files_only=cfg.get('main_files_only', False))
     RUN_DETAILS.update(publication=result)
     console.print(f"Folder: {result['folder_url']}")
     console.print(f"Verified report: {result['sheet_url']}")
@@ -860,6 +860,27 @@ def cmd_refresh_report(args):
         if args.publish:
             cmd_publish_report(args)
         return 2 if summary["status"] == "partial" else 0
+
+
+def cmd_morning(args):
+    import json
+    from jobagent.morning import run_daily, daily_work
+    from jobagent.drive_output import authenticate_drive, Publisher, STATE_PATH
+    from jobagent.runtime import process_lock
+    config = load_yaml('config.yaml')
+    profile = load_profile(ROOT / config.get('profile_file', 'profile.yaml'))
+    cfg = config.get('drive_output', {})
+    connection = {}
+    def preflight():
+        connection['drive'] = authenticate_drive(cfg.get('expected_account'))
+    def publish(out):
+        with process_lock(STATE_PATH.with_suffix('.lock')):
+            return Publisher(connection['drive']).publish(out, cfg.get('folder_name', 'JobAgent Output'), main_files_only=cfg.get('main_files_only', False))
+    result = run_daily(config, profile, Path(args.out), initial=args.initial,
+                       work=daily_work, publish=publish, preflight=preflight, progress=console.print)
+    RUN_DETAILS.update(result)
+    console.print(json.dumps(result, indent=2))
+    return 2 if result.get('status') == 'window_ended' else 0
 
 
 def cmd_rescore(args) -> None:
@@ -1163,6 +1184,11 @@ def main() -> None:
     refresh.add_argument("--publish", action="store_true", help="publish output into the permanent Drive folder and report")
     refresh.set_defaults(func=cmd_refresh_report)
 
+    morning = sub.add_parser('morning', help='once-daily 06:00-11:00 IST search, unsent outreach and Drive publication')
+    morning.add_argument('--out', default='research/report-latest')
+    morning.add_argument('--initial', action='store_true', help='explicitly authorized one-time setup run outside the morning window')
+    morning.set_defaults(func=cmd_morning)
+
     sub.add_parser("rescore", help="re-apply current rules to every stored job"
                    ).set_defaults(func=cmd_rescore)
 
@@ -1201,7 +1227,7 @@ def main() -> None:
                       (str(exc) if isinstance(exc, (ValueError, FileNotFoundError))
                        or type(exc).__name__ == "GmailAuthError" else "Command failed; no success recorded."))
     finally:
-        if args.command in ("fetch", "score", "digest", "apply-kit", "draft-outreach", "verify-outreach", "rescore", "refresh-report", "publish-report") and not getattr(args, "dry_run", False):
+        if args.command in ("fetch", "score", "digest", "apply-kit", "draft-outreach", "verify-outreach", "rescore", "refresh-report", "publish-report", "morning") and not getattr(args, "dry_run", False):
             atomic_json(ROOT / "logs" / f"last-{args.command}.json", {
                 "command": args.command, "started_at": started, "finished_at": now_iso(),
                 "status": "ok" if code == 0 else "partial" if code == 2 else "failed",

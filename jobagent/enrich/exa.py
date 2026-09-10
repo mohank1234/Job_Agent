@@ -25,6 +25,7 @@ def exa_search(
     include_domains: list[str] | None = None,
     exclude_domains: list[str] | None = None,
     start_published_date: str | None = None,
+    max_characters: int = 500,
 ) -> list[dict]:
     """Run a neural search query. Returns a list of
     {title, url, published_date, author, snippet}.
@@ -37,7 +38,7 @@ def exa_search(
     if not api_key:
         raise ExaError("unauthorized", "EXA_API_KEY is not set")
 
-    body: dict = {"query": query, "numResults": num_results, "contents": {"text": {"maxCharacters": 500}}}
+    body: dict = {"query": query, "numResults": num_results, "contents": {"text": {"maxCharacters": max_characters}}}
     if include_domains:
         body["includeDomains"] = include_domains
     if exclude_domains:
@@ -70,6 +71,6 @@ def exa_search(
             "url": r.get("url") or "",
             "published_date": r.get("publishedDate"),
             "author": r.get("author"),
-            "snippet": text[:500],
+            "snippet": text[:max_characters],
         })
     return out

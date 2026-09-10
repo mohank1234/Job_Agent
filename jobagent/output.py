@@ -29,6 +29,7 @@ FIELDS = [
     "Salary (source)", "Listing Type",
     "JD Status", "JD Verified At", "JD Source URL", "JD SHA256", "Rule Score",
     "Scoring Method", "Checked At", "Verification Error",
+    "Experience Focus", "Experience Evidence", "Impact Evidence", "Framework Review", "Employer Job Link", "Duplicate Listing URLs", "Location Variants",
 ]
 FAILURES = {"blocked", "fetch_error", "description_missing", "unsupported_source", "ambiguous_posting"}
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

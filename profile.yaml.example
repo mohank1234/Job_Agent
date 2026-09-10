@@ -423,6 +423,8 @@ seniority:
 # delete jobs from the database.
 # -----------------------------------------------------------------------------
 preferences:
+  # Pay is shown when published, but never filters/ranks the daily search.
+  compensation_filter_enabled: false
   home_country: India        # residence; distinct from the search markets below
   # Global search. Remote roles anywhere are in scope; onsite roles are in
   # scope in these markets. Locations affect the SCORE, never storage.

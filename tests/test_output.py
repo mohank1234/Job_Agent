@@ -201,6 +201,20 @@ def test_republish_reuses_folder_and_sheet_ids(tmp_path):
     assert first["sheet_id"] == third["sheet_id"] and len(drive.items) == 8
 
 
+def test_main_files_publish_keeps_excel_sheet_resume_only(tmp_path):
+    drive = FakeDrive()
+    bundle(tmp_path)
+    (tmp_path/'Candidate_Resume.docx').write_bytes(b'Resume document fixture')
+    (tmp_path/'Research Notes.md').write_text('Supporting research stays local')
+    (tmp_path/'deliverables.json').write_text(json.dumps({'version':1,'files':['Candidate_Resume.docx','Research Notes.md']}))
+    publisher = Publisher(drive, tmp_path/'state.json')
+    first = publisher.publish(tmp_path, main_files_only=True)
+    publisher.publish(tmp_path, main_files_only=True)
+    assert len(drive.items) == 4  # folder plus three main files, no receipt or tracker
+    assert len(first['files']) == 3
+    assert {v['name'] for v in drive.items.values()} == {'JobAgent Output','JobAgent - Verified Jobs','JobAgent Report.xlsx','Candidate_Resume.docx'}
+
+
 def test_uncertain_create_is_recovered_without_duplicate(tmp_path):
     drive = FakeDrive()
     drive.crash_after_create = True

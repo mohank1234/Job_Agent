@@ -6,7 +6,13 @@ connects current job verification to a permanent Drive folder and Google Sheet.
 
 ## Output
 
-One folder, **JobAgent Output**, contains:
+With `drive_output.main_files_only: true`, one folder, **JobAgent Output**, contains
+only the main Google Sheet, its Excel download, and the resume document. The
+workbook includes full JDs, fit notes, contacts, email drafts and Gmail status.
+Supporting CSV, Markdown, JSON and publication receipts stay local. This mode
+does not recreate archived supporting files or the optional application tracker.
+
+With full publication enabled (`main_files_only: false`), the outputs are:
 
 - **JobAgent - Verified Jobs**: start page, current vacancies ready for review,
   vacancies with fit questions, excluded jobs and unavailable/failed checks.

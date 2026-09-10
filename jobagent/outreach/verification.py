@@ -9,7 +9,7 @@ import csv
 import hashlib
 import io
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 import httpx
 
@@ -21,7 +21,8 @@ from jobagent.sources.ats import ADAPTERS
 from .service import EMAIL
 
 ATS_HOSTS = {"jobs.ashbyhq.com": "ashby", "jobs.lever.co": "lever",
-             "boards.greenhouse.io": "greenhouse", "job-boards.greenhouse.io": "greenhouse"}
+             "boards.greenhouse.io": "greenhouse", "job-boards.greenhouse.io": "greenhouse",
+             "job-boards.eu.greenhouse.io": "greenhouse"}
 
 
 def public_url(url):
@@ -67,7 +68,20 @@ def canonical(url):
     # ATS application forms and the posting describe the same requisition.
     if host in ATS_HOSTS and path.endswith("/application"):
         path = path[:-12]
-    return host + path
+    identity = parse_qs(p.query).get('gh_jid', [''])[0]
+    return host + path + (('?gh_jid=' + identity) if identity.isdigit() and host not in ATS_HOSTS else '')
+
+
+def employer_posting(job, vendor, slug):
+    """Resolve employer-owned Greenhouse URLs using the actual API posting ID."""
+    from dataclasses import replace
+    if vendor != 'greenhouse' or board_ref(job.url):
+        return job
+    posting_id = str((job.raw or {}).get('id', ''))
+    if not posting_id.isdigit():
+        return job
+    return replace(job, url=f'https://job-boards.greenhouse.io/{slug}/jobs/{posting_id}',
+                   raw={**job.raw, 'employer_url': job.url})
 
 
 def fetch_board(url, client):
@@ -84,7 +98,7 @@ def fetch_board(url, client):
             raise ValueError("Invalid Lever response")
     elif not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
         raise ValueError("ATS response lacks a jobs array")
-    return parse(slug, data), api_url
+    return [employer_posting(j, vendor, slug) for j in parse(slug, data)], api_url
 
 
 def verify_row(row, profile, client, *, board_cache=None, use_firecrawl=False):
@@ -137,6 +151,7 @@ def verify_row(row, profile, client, *, board_cache=None, use_firecrawl=False):
                         out.update({"JD Status": "verified_live", "JD Text": job.description,
                                     "JD Verified At": now_iso(), "Job Title": job.title,
                                     "Location": job.location, "Workplace": job.workplace,
+                                    "Employer Job Link": (job.raw or {}).get('employer_url', job.url),
                                     "Salary (source)": job.salary or "Not stated in structured source; check full JD",
                                     "JD SHA256": hashlib.sha256(job.description.encode()).hexdigest()})
                         job.apply_classification(classify(job, profile))
