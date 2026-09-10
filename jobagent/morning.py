@@ -229,8 +229,25 @@ def prepare_report(out, rows, coverage, research, summary):
                            state.get('Gmail Draft URL', ''), row.get('Cold Email Subject', ''), row.get('Cold Email', ''),
                            row.get('LinkedIn Note', ''), row.get('Manager LinkedIn', ''), row.get('Email Source', ''),
                            row.get('Email Evidence', ''), 'Pending user approval; unsent', row['Job Link']])
+    linkedin_headers = ['Name', 'Company', 'JD', 'Source', 'LinkedIn ID', 'LinkedIn Link',
+                        'LinkedIn Note', 'LinkedIn Note Length', 'Job Link']
+    linkedin_rows = []
+    for row in shortlist:
+        manager_li, contact_li = row.get('Manager LinkedIn', ''), row.get('Email Contact LinkedIn', '')
+        if manager_li:
+            name, linkedin_url, source = row.get('Manager Name', ''), manager_li, row.get('Manager Source', '')
+        elif contact_li:
+            name, linkedin_url, source = row.get('Email Contact Name', ''), contact_li, row.get('Email Source', '')
+        else:
+            continue
+        slug = re.search(r'linkedin\.com/in/([A-Za-z0-9_%.-]+)', linkedin_url)
+        note = row.get('LinkedIn Note', '')
+        linkedin_rows.append([name, row.get('Company Display Name') or row['Company'], row['Job Title'],
+                              source, slug.group(1) if slug else '', linkedin_url,
+                              note, str(len(note)), row['Job Link']])
     workbook = make_workbook(tabs, summary, extra_grids={
         "Email drafts": [email_headers, *email_rows],
+        "LinkedIn outreach": [linkedin_headers, *linkedin_rows],
         "Startup shortlist": grid,
         "Source coverage": [coverage_fields, *[[r.get(k, "") for k in coverage_fields] for r in coverage_rows]],
     })

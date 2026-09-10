@@ -279,7 +279,8 @@ def make_workbook(tabs, summary, *, extra_grids=None):
                 widths = {"Company": 20, "Job Title": 40, "Location": 24, "Job Link": 38,
                           "JD Text": 85, "Fit Notes": 55, "Profile Skills Mentioned": 45, "Workplace": 14,
                           "Cold Email": 85, "LinkedIn Note": 55, "Requirements To Confirm": 60,
-                          "Email Evidence": 60, "Why This Role": 65}
+                          "Email Evidence": 60, "Why This Role": 65, "Name": 22, "Source": 40,
+                          "LinkedIn ID": 24, "LinkedIn Link": 42, "JD": 40}
                 ws.column_dimensions[get_column_letter(index)].width = 85 if field.startswith("JD Text") else widths.get(field, 27)
         else:
             ws.column_dimensions["A"].width = 36
