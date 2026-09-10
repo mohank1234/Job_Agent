@@ -46,20 +46,6 @@ jobs:
           restore-keys: |
             jobagent-private-v1-
 
-      - name: Restore legacy state during migration
-        if: hashFiles('.jobagent-state.enc') == ''
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            jobs.db
-            drive_output_state.json
-            outreach_draft_ledger.json
-            gmail_report_drafts.json
-            research/
-          key: jobagent-state-${{ github.run_id }}
-          restore-keys: |
-            jobagent-state-
-
       - name: Decrypt checkpoint
         env:
           JOBAGENT_STATE_KEY: ${{ secrets.JOBAGENT_STATE_KEY }}
