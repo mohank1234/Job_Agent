@@ -46,6 +46,14 @@ jobs:
           restore-keys: |
             jobagent-private-v1-
 
+      - name: One-time bootstrap - adopt corrected checkpoint (TEMPORARY, remove after first clean run)
+        env:
+          DRIVE_TOKEN_JSON: ${{ secrets.DRIVE_TOKEN_JSON }}
+        run: |
+          set -eu
+          printf '%s' "$DRIVE_TOKEN_JSON" > drive_token.json
+          python tools/ci_bootstrap_seed.py 1SVyYlmycA2gZWDEcJNoHAWQu5O6Z85y0
+
       - name: Decrypt checkpoint
         env:
           JOBAGENT_STATE_KEY: ${{ secrets.JOBAGENT_STATE_KEY }}
@@ -68,9 +76,6 @@ jobs:
           printf '%s' "$GMAIL_CREDENTIALS_JSON" > credentials.json
           printf '%s' "$GMAIL_TOKEN_JSON" > token.json
           printf '%s' "$DRIVE_TOKEN_JSON" > drive_token.json
-
-      - name: One-time bootstrap - adopt corrected checkpoint (TEMPORARY, remove after first clean run)
-        run: python tools/ci_bootstrap_seed.py 1SVyYlmycA2gZWDEcJNoHAWQu5O6Z85y0
 
       - name: Validate setup and adopt reviewed state
         id: prepared
