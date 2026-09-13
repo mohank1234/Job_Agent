@@ -69,6 +69,9 @@ jobs:
           printf '%s' "$GMAIL_TOKEN_JSON" > token.json
           printf '%s' "$DRIVE_TOKEN_JSON" > drive_token.json
 
+      - name: One-time bootstrap - adopt corrected checkpoint (TEMPORARY, remove after first clean run)
+        run: python tools/ci_bootstrap_seed.py 1SVyYlmycA2gZWDEcJNoHAWQu5O6Z85y0
+
       - name: Validate setup and adopt reviewed state
         id: prepared
         env:
