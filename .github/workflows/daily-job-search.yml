@@ -2,9 +2,11 @@ name: Daily job search
 
 # Runs the same `python run.py morning` pipeline the laptop's Task Scheduler
 # runs locally (see Install-Report-Schedule.ps1), but on GitHub's servers so
-# it fires even when the laptop is off. It only ever creates Gmail DRAFTS and
-# writes to the "JobAgent Output" Drive folder — nothing is ever sent
-# automatically; review and send by hand when you're back.
+# it fires even when the laptop is off. Outreach to companies only ever
+# becomes a Gmail DRAFT and a "JobAgent Output" Drive update — nothing to a
+# third party is ever sent automatically; review and send those by hand.
+# Separately, a same-account status email (real results, no outreach) is
+# sent to yourself each day real work completes - see jobagent/notify.py.
 #
 # in_window() in jobagent/morning.py restricts real work to 06:00-11:00 IST
 # regardless of the runner's own timezone, so multiple triggers below are
@@ -86,6 +88,7 @@ jobs:
         run: python -c "import json,pathlib; from datetime import datetime,timezone,timedelta; p=pathlib.Path('research/morning-private/ledger.json'); d=json.loads(p.read_text()) if p.exists() else {'version':1,'days':{}}; key=(datetime.now(timezone.utc)+timedelta(hours=5,minutes=30)).date().isoformat(); d['days'].pop(key, None); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(d)); print('reset', key)"
 
       - name: Run morning pipeline
+        id: morning
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
@@ -110,6 +113,10 @@ jobs:
           if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then
             exit "$code"
           fi
+
+      - name: Send daily results email
+        if: steps.morning.outcome == 'success'
+        run: python tools/send_run_email.py
 
       - name: Encrypt persistent state
         id: encrypted
