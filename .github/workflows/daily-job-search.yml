@@ -15,7 +15,12 @@ on:
     - cron: '30 0 * * *'  # 06:00 IST - primary run
     - cron: '0 3 * * *'   # 08:30 IST - catch-up if the primary run failed/skipped
     - cron: '0 5 * * *'   # 10:30 IST - last-chance catch-up before the window closes
-  workflow_dispatch: {}    # manual "Run workflow" button for on-demand runs
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Force a real run right now (ignore the 06:00-11:00 IST window and "already done today" check). Testing only.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -76,15 +81,24 @@ jobs:
           JOBAGENT_REVIEWED_CONTACTS_JSON: ${{ secrets.JOBAGENT_REVIEWED_CONTACTS_JSON }}
         run: python -m jobagent.cloud_state prepare
 
+      - name: Reset today's completion marker (manual force-run only)
+        if: github.event.inputs.force_run == 'true'
+        run: python -c "import json,pathlib; from datetime import datetime,timezone,timedelta; p=pathlib.Path('research/morning-private/ledger.json'); d=json.loads(p.read_text()) if p.exists() else {'version':1,'days':{}}; key=(datetime.now(timezone.utc)+timedelta(hours=5,minutes=30)).date().isoformat(); d['days'].pop(key, None); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(d)); print('reset', key)"
+
       - name: Run morning pipeline
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          FORCE_RUN: ${{ github.event.inputs.force_run }}
           PYTHONIOENCODING: utf-8
         run: |
           set +e
-          python run.py morning 2>&1 | tee morning-run.log
+          ARGS=""
+          if [ "$FORCE_RUN" = "true" ]; then
+            ARGS="--initial"
+          fi
+          python run.py morning $ARGS 2>&1 | tee morning-run.log
           code=${PIPESTATUS[0]}
           set -e
           # 2 = "window_ended": the 11:00 IST deadline hit mid-run. Expected
