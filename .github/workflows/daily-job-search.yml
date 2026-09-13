@@ -51,6 +51,14 @@ jobs:
           restore-keys: |
             jobagent-private-v1-
 
+      - name: One-time bootstrap - adopt corrected checkpoint (TEMPORARY, remove after first clean run)
+        env:
+          DRIVE_TOKEN_JSON: ${{ secrets.DRIVE_TOKEN_JSON }}
+        run: |
+          set -eu
+          printf '%s' "$DRIVE_TOKEN_JSON" > drive_token.json
+          python tools/ci_bootstrap_seed.py 1M4T-sXBByqeU1bmNkvyd_ZdDmN2vma3w
+
       - name: Decrypt checkpoint
         env:
           JOBAGENT_STATE_KEY: ${{ secrets.JOBAGENT_STATE_KEY }}
