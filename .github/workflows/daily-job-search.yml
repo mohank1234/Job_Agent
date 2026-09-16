@@ -131,3 +131,15 @@ jobs:
         with:
           path: .jobagent-state.enc
           key: jobagent-private-v1-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Best-effort: if the failure is the Gmail token itself being broken,
+      # this alert needs that same token and will fail to send too. GitHub's
+      # own built-in "failed workflow run" email notification (account
+      # Settings -> Notifications -> Actions) is the independent backup for
+      # exactly that case.
+      - name: Send failure alert email
+        if: failure()
+        continue-on-error: true
+        env:
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python tools/send_failure_alert.py
