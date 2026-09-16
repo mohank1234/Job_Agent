@@ -1,21 +1,27 @@
 """Gmail draft creation via OAuth — the authorized route to outreach email.
 
-Deliberately DRAFT-ONLY. There is no send function here. Actual sending
-needs the full policy machinery this project doesn't have yet: recipient
-confidence checks, a suppression/do-not-contact list, a send ledger to
-prevent duplicates across reruns, and an explicit user-enabled policy. Until
-that exists, this module's job stops at "create a draft you can review in
-Gmail and send yourself."
+Draft creation is always available. Actually sending a drafted message is
+gated behind outreach.gmail.mode == 'auto_send' in config.yaml (default:
+'draft_only') — an explicit, user-enabled policy — and even then only the
+send-eligible path in report_drafts.py may call drafts().send(): recipient
+confidence checks (draft_recipient's public+evidenced address rule), a send
+ledger keyed per-company to prevent duplicates across reruns, and no send
+for a draft whose content diverges from what this app generated (preserves
+edits the user hasn't confirmed are ready). This module itself still has no
+bare "compose and blast" helper — sending only ever happens through an
+already-created, already-validated draft.
 
-Scope: gmail.compose (draft creation now and, once a sending policy exists,
-sending — without granting access to read arbitrary mail) plus
-drive.readonly, added 2026-09-08 specifically to find and read the
-"JobAgent Outreach Report" Sheet the cloud outreach routine writes to. Read-
-only, and used for nothing else — never write, delete, or touch any other
-file with this scope. drive.file (access only to files this app creates)
-would be tighter but cannot read a pre-existing file it didn't create, and
-there's no lighter scope that can find a file by name without either that
-or a full Picker UI flow. Never request more than the feature in use needs.
+Scope: gmail.compose (draft creation, and sending an existing draft once
+outreach.gmail.mode == 'auto_send' — without granting access to read
+arbitrary mail) plus drive.readonly, added 2026-09-08 specifically to find
+and read the "JobAgent Outreach Report" Sheet the cloud outreach routine
+writes to, and gmail.readonly, added 2026-09-16 specifically so a sent
+thread can be checked for a reply before sending at most one automatic
+follow-up (jobagent/outreach/followup.py) — used for nothing else. drive.file
+(access only to files this app creates) would be tighter but cannot read a
+pre-existing file it didn't create, and there's no lighter scope that can
+find a file by name without either that or a full Picker UI flow. Never
+request more than the feature in use needs.
 
 Setup (see SETUP.md):
   1. Google Cloud Console -> enable Gmail API -> create an OAuth 2.0 Client
@@ -24,8 +30,8 @@ Setup (see SETUP.md):
      writes token.json (also gitignored) so future calls don't re-prompt.
   3. token.json is refreshed automatically when it expires; delete it to
      force re-authorization (e.g. after changing scopes or accounts) — this
-     IS required after the drive.readonly scope was added, since an
-     existing token only carries the scopes it was originally granted.
+     IS required whenever a scope is added, since an existing token only
+     carries the scopes it was originally granted.
 
 Official docs: https://developers.google.com/workspace/gmail/api/guides/sending
 """
@@ -41,6 +47,7 @@ from jobagent.runtime import atomic_json
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/gmail.readonly",
 ]
 
 ROOT = Path(__file__).parent.parent.parent

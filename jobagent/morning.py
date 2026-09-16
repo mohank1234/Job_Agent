@@ -409,8 +409,10 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         remaining(deadline)
         progress('Morning step 2: Excel report prepared; now save Gmail drafts for approval.')
         from jobagent.outreach.report_drafts import sync_report_drafts
+        outreach_gmail_cfg = config.get('outreach', {}).get('gmail', {})
+        auto_send = outreach_gmail_cfg.get('mode') == 'auto_send'
         try:
-            drafts = sync_report_drafts(out,config.get('drive_output',{}).get('expected_account'),deadline=deadline,resume_path=resume_path)
+            drafts = sync_report_drafts(out,config.get('drive_output',{}).get('expected_account'),deadline=deadline,resume_path=resume_path,auto_send=auto_send)
             summary['gmail_drafts'] = {status:sum(d['Status']==status for d in drafts) for status in set(d['Status'] for d in drafts)}
             if any(d['Status'].startswith('Uncertain draft result') for d in drafts):
                 summary['issues'].append({'stage':'gmail_drafts','error':'UncertainDraftResult'})
@@ -421,6 +423,16 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
             summary['status'] = 'partial'
             atomic_json(out/'Gmail Draft Status.json',{'checked_at':now_iso(),'status':'failed','error':type(exc).__name__,'outreach_sent':0})
             augment_manifest(out,['Gmail Draft Status.json'])
+        if auto_send:
+            progress('Morning step 2b: checking sent outreach for follow-ups.')
+            from jobagent.outreach.followup import send_followups
+            try:
+                followups = send_followups(config.get('drive_output',{}).get('expected_account'),
+                                           after_days=outreach_gmail_cfg.get('followup_after_days', 5))
+                summary['followups'] = {status:sum(f['status']==status for f in followups) for status in set(f['status'] for f in followups)}
+            except Exception as exc:
+                summary['issues'].append({'stage':'followups','error':type(exc).__name__})
+                summary['status'] = 'partial'
         prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary)
     return summary
 

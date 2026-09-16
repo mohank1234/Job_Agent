@@ -285,19 +285,29 @@ enrichment:
     enabled: false
     api_key_env: BROWSERBASE_API_KEY
 
-# Outbound email. Draft-only by default and for the foreseeable future — see
-# jobagent/outreach/gmail.py. There is no sending policy implemented yet
-# (recipient confidence checks, suppression list, dedup ledger), so no send
-# function exists to enable even if you flip this on. Setup: Google Cloud
-# Console -> enable Gmail API -> OAuth 2.0 Client ID (Desktop app) ->
-# download as credentials.json in the project root. First run opens a
-# browser for one-time consent.
+# Outbound email. Setup: Google Cloud Console -> enable Gmail API -> OAuth
+# 2.0 Client ID (Desktop app) -> download as credentials.json in the
+# project root. First run opens a browser for one-time consent.
+#
+# mode: draft_only (default) - every message lands as a Gmail draft you
+#   personally review and send. Zero risk of an unreviewed message reaching
+#   a real company.
+# mode: auto_send - once a message is composed and a verified public
+#   recipient email exists (draft_recipient's public+evidenced address
+#   rule), it is sent immediately with no human review step, and a single
+#   automatic follow-up (see jobagent/outreach/followup.py) goes out after
+#   followup_after_days if no reply was observed in that thread. A ledger
+#   (gmail_report_drafts.json) prevents any duplicate send or a second
+#   follow-up. Only ever set this if you explicitly want fully autonomous
+#   outreach to real companies with no review step - see
+#   jobagent/outreach/gmail.py for the exact safety rails this still keeps.
 outreach:
   gmail:
     enabled: true
     credentials_path: credentials.json
     token_path: token.json
-    mode: draft_only          # the only mode that exists right now
+    mode: draft_only
+    followup_after_days: 5   # only used when mode is auto_send
     sheet_id: ""             # fixed ID; never silently choose the newest same-name file
     expected_sender: ""      # authenticated Gmail account must match
 

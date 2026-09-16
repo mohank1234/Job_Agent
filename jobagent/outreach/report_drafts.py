@@ -74,7 +74,19 @@ def draft_recipient(row):
     return ''
 
 
-def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None, deadline=None, recreate_missing=False, resume_path=None):
+def extract_signature(body):
+    """Best-effort sign-off block: the text after the last blank line."""
+    parts = body.strip().split('\n\n')
+    return parts[-1] if len(parts) > 1 else ''
+
+
+# Only these draft outcomes reflect content this app generated and verified
+# unchanged; anything else (preserved user edits, uncertain results) is left
+# for manual review even when auto-send is enabled.
+SEND_ELIGIBLE_STATUSES = {'Created and read back', 'Updated and read back', 'Existing draft reused'}
+
+
+def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None, deadline=None, recreate_missing=False, resume_path=None, auto_send=False):
     if not expected_sender:
         raise ValueError('Expected Gmail account is required')
     resume_data, resume_meta = load_resume(resume_path) if resume_path else (None, None)
@@ -205,11 +217,31 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 except Exception as exc:
                     entry.update(state='uncertain',error=type(exc).__name__)
                     result['Status'] = 'Uncertain draft result; no automatic duplicate retry'
-            if current or entry.get('draft_id'):
+            if (auto_send and result['Status'] in SEND_ELIGIBLE_STATUSES
+                    and entry.get('draft_id') and entry.get('state') == 'drafted' and to):
+                try:
+                    sent = api.send(userId='me', body={'id': entry['draft_id']}).execute()
+                    headers = service.users().messages().get(
+                        userId='me', id=sent['id'], format='metadata', metadataHeaders=['Message-ID']
+                    ).execute().get('payload', {}).get('headers', [])
+                    rfc_message_id = next((h['value'] for h in headers if h['name'] == 'Message-ID'), '')
+                    entry.update(state='sent', sent_at=now_iso(), sent_to=to, sent_message_id=sent['id'],
+                                 sent_message_url=f"https://mail.google.com/mail/#all/{sent['id']}",
+                                 thread_id=sent.get('threadId', ''), rfc_message_id=rfc_message_id,
+                                 subject=subject, role=row.get('Job Title', ''), signature=extract_signature(body))
+                    result.update(Status='Sent automatically (auto-send enabled)',
+                                  Approval='Sent automatically; no manual review step')
+                except Exception as exc:
+                    entry.update(state='uncertain', error=type(exc).__name__)
+                    result['Status'] = 'Auto-send failed; left as draft for manual review'
+            if entry.get('state') == 'sent':
+                result['Gmail Draft URL'] = entry.get('sent_message_url', '')
+            elif current or entry.get('draft_id'):
                 result['Gmail Draft URL'] = 'https://mail.google.com/mail/u/0/#drafts'
             result['Resume Attachment'] = '; '.join(a['filename'] for a in actual_attachments)
             ledger[key] = entry
             atomic_json(ledger_path,ledger)
             results.append(result)
-        atomic_json(out/'Gmail Draft Status.json',{'checked_at':now_iso(),'sender':sender,'outreach_sent':0,'drafts':results})
+        outreach_sent = sum(1 for r in results if r['Status'] == 'Sent automatically (auto-send enabled)')
+        atomic_json(out/'Gmail Draft Status.json',{'checked_at':now_iso(),'sender':sender,'outreach_sent':outreach_sent,'drafts':results})
         return results
