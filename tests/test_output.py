@@ -116,8 +116,36 @@ def test_workbook_has_full_jd_and_treats_formula_like_text():
     data = report_bytes(Company=value)
     wb = load_workbook(io.BytesIO(data), data_only=False)
     ws = wb["Ready to review"]
-    assert ws["A2"].value == value and ws["A2"].data_type == "s"
+    company_cell = ws.cell(2, output.FIELDS.index("Company") + 1)
+    assert company_cell.value == value and company_cell.data_type == "s"
     assert ws.cell(2, output.FIELDS.index("JD Text") + 1).value == good_row()["JD Text"]
+
+
+def test_first_seen_date_persists_across_days(tmp_path):
+    path = tmp_path / "first-seen.json"
+    tabs_day1 = output.partition([good_row()], first_seen_path=path, today="2026-01-01")
+    assert tabs_day1["Ready to review"][0]["Date"] == "2026-01-01"
+    # Same posting shows up again on a later day - it keeps the date it was
+    # actually first seen, not today's date.
+    tabs_day2 = output.partition([good_row()], first_seen_path=path, today="2026-01-05")
+    assert tabs_day2["Ready to review"][0]["Date"] == "2026-01-01"
+    # A genuinely new posting on day 2 gets stamped with day 2's date.
+    tabs_day2b = output.partition([good_row(**{"Job Link": "https://jobs.ashbyhq.com/example/2"})],
+                                   first_seen_path=path, today="2026-01-05")
+    assert tabs_day2b["Ready to review"][0]["Date"] == "2026-01-05"
+
+
+def test_no_new_today_banner_appears_and_disappears():
+    old_tabs = output.partition([good_row()], today="2026-01-01")
+    data = output.make_workbook(old_tabs, report_summary(), today="2026-01-05")
+    ws = load_workbook(io.BytesIO(data))["Ready to review"]
+    assert ws.cell(2, 1).value == "Nothing new for today (2026-01-05); rows below are from earlier days."
+    assert ws.cell(3, output.FIELDS.index("Company") + 1).value == "Example"
+
+    fresh_tabs = output.partition([good_row()], today="2026-01-05")
+    data = output.make_workbook(fresh_tabs, report_summary(), today="2026-01-05")
+    ws = load_workbook(io.BytesIO(data))["Ready to review"]
+    assert ws.cell(2, output.FIELDS.index("Company") + 1).value == "Example"
 
 
 def test_long_jd_survives_excel_cell_limit():

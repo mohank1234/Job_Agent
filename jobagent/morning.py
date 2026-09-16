@@ -201,8 +201,9 @@ def prepare_report(out, rows, coverage, research, summary):
     from jobagent.startup_output import enrich_rows, write_outreach
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(IST).date().isoformat()
     shortlist = enrich_rows(rows, research)
-    tabs = partition(rows)
+    tabs = partition(rows, first_seen_path=STATE / "first-seen.json", today=today)
     summary.update(checked=len(rows), counts={k: len(v) for k, v in tabs.items()}, startup_shortlist_count=len(shortlist))
     grid = write_outreach(out, shortlist)
     atomic_json(out / "startup-research.json", research)
@@ -251,7 +252,7 @@ def prepare_report(out, rows, coverage, research, summary):
         "LinkedIn outreach": [linkedin_headers, *linkedin_rows],
         "Startup shortlist": grid,
         "Source coverage": [coverage_fields, *[[r.get(k, "") for k in coverage_fields] for r in coverage_rows]],
-    })
+    }, today=today)
     (out / "JobAgent Report.xlsx").write_bytes(workbook)
     augment_manifest(out, ["Startup Outreach.csv", "Startup Outreach.md", "startup-research.json", "Source Coverage.csv", "Daily Run.json"])
 

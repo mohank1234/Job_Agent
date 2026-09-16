@@ -22,8 +22,11 @@ from jobagent.outreach.verification import (
 )
 
 QA_TITLE = re.compile(r"\b(?:qa|sdet|quality|test(?:ing)?|tester|evaluation)\b", re.I)
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
+ROOT = Path(__file__).resolve().parents[1]
+FIRST_SEEN_PATH = ROOT / "research" / "morning-private" / "first-seen.json"
 FIELDS = [
-    "Company", "Job Title", "Location", "Job Link", "JD Text", "Fit Status", "Workplace",
+    "Date", "Company", "Job Title", "Location", "Job Link", "JD Text", "Fit Status", "Workplace",
     "Fit Notes", "Profile Skills Mentioned", "Known Gaps Mentioned",
     "Experience Requirements (source excerpts)", "Requirements Excerpt (source)",
     "Salary (source)", "Listing Type",
@@ -93,10 +96,25 @@ def deduplicate(rows):
     return result
 
 
-def partition(rows):
+def partition(rows, *, first_seen_path=None, today=None):
+    """Stamp each row with the IST date it was first seen. Without an
+    explicit first_seen_path (tests, ad-hoc calls), every row is just
+    stamped with today's date and nothing is persisted. Real callers pass a
+    path so a posting keeps the date it actually first appeared, even when
+    the same job shows up again on a later day."""
+    today = today or datetime.now(IST).date().isoformat()
+    store, changed = {}, False
+    if first_seen_path is not None:
+        first_seen_path = Path(first_seen_path)
+        store = json.loads(first_seen_path.read_text(encoding="utf-8")) if first_seen_path.exists() else {}
     tabs = {"Ready to review": [], "Fit needs checking": [], "Excluded jobs": [], "Failed checks": []}
     for original in rows:
         row = dict(original)
+        key = canonical(row.get("Job Link", "")) if first_seen_path is not None else None
+        if key and key not in store:
+            store[key] = today
+            changed = True
+        row["Date"] = store.get(key, today)
         live = (row.get("JD Status") == "verified_live" and
                 recent(row.get("JD Verified At"), max_age_days=1) and
                 len(row.get("JD Text", "").strip()) >= 200 and
@@ -117,6 +135,8 @@ def partition(rows):
         tabs[target].append(row)
     for values in tabs.values():
         values.sort(key=lambda r: (-int(r.get("Rule Score") or 0), r.get("Company", ""), r.get("Job Title", "")))
+    if changed:
+        atomic_json(first_seen_path, store)
     return tabs
 
 
@@ -178,8 +198,9 @@ def build_report(profile, leads, out, *, limit=50, discovery_queries=(), search=
             verified.append(result)
             if progress:
                 progress(f"{result['Company']}: new board vacancy / {result['Fit Status']}")
+    today = datetime.now(IST).date().isoformat()
     shortlist = enrich_rows(verified, research)
-    tabs = partition(verified)
+    tabs = partition(verified, first_seen_path=FIRST_SEEN_PATH, today=today)
     summary = {
         "schema_version": 1, "checked_at": now_iso(), "checked": len(verified),
         "counts": {k: len(v) for k, v in tabs.items()}, "issues": issues,
@@ -201,7 +222,7 @@ def build_report(profile, leads, out, *, limit=50, discovery_queries=(), search=
     extras = {"Startup shortlist": write_outreach(out, shortlist)} if research["roles"] else None
     summary["startup_shortlist_count"] = len(shortlist)
     atomic_json(out / "verification.json", summary)
-    workbook = make_workbook(tabs, summary, extra_grids=extras)
+    workbook = make_workbook(tabs, summary, extra_grids=extras, today=today)
     (out / "JobAgent Report.xlsx").write_bytes(workbook)
     return summary, verified
 
@@ -216,10 +237,15 @@ def text_cell(value):
     return value
 
 
-def make_workbook(tabs, summary, *, extra_grids=None):
+NO_NEW_TODAY_SHEETS = {"Ready to review", "Fit needs checking"}
+
+
+def make_workbook(tabs, summary, *, extra_grids=None, today=None):
     from openpyxl import Workbook
+    from openpyxl.cell.cell import MergedCell
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
+    today = today or datetime.now(IST).date().isoformat()
     wb = Workbook()
     wb.remove(wb.active)
     overview = [
@@ -262,9 +288,19 @@ def make_workbook(tabs, summary, *, extra_grids=None):
         ws = wb.create_sheet(name)
         for row in grid:
             ws.append([text_cell(x) for x in row])
+        if name in NO_NEW_TODAY_SHEETS and "Date" in grid[0]:
+            date_idx = grid[0].index("Date")
+            if not any(r[date_idx] == today for r in grid[1:]):
+                message = (f"Nothing new for today ({today})." if len(grid) == 1 else
+                           f"Nothing new for today ({today}); rows below are from earlier days.")
+                ws.insert_rows(2)
+                ws.cell(row=2, column=1, value=message)
+                ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(grid[0]))
         # Explicit strings prevent formula injection from source-controlled text.
         for row in ws:
             for cell in row:
+                if isinstance(cell, MergedCell):
+                    continue
                 cell.data_type = "s"
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
         for cell in ws[1]:
@@ -276,7 +312,7 @@ def make_workbook(tabs, summary, *, extra_grids=None):
             for i in range(2, ws.max_row + 1):
                 ws.row_dimensions[i].height = 80
             for index, field in enumerate(grid[0], 1):
-                widths = {"Company": 20, "Job Title": 40, "Location": 24, "Job Link": 38,
+                widths = {"Date": 12, "Company": 20, "Job Title": 40, "Location": 24, "Job Link": 38,
                           "JD Text": 85, "Fit Notes": 55, "Profile Skills Mentioned": 45, "Workplace": 14,
                           "Cold Email": 85, "LinkedIn Note": 55, "Requirements To Confirm": 60,
                           "Email Evidence": 60, "Why This Role": 65, "Name": 22, "Source": 40,
