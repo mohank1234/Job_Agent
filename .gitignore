@@ -21,6 +21,9 @@ credentials.json
 token.json
 drive_token.json
 drive_token.json.*.tmp
+
+# Apify API token - never commit; grants billing-enabled API access.
+apify_token.txt
 drive_output_state.json
 drive_output_state.json.*.tmp
 drive_output_state.lock

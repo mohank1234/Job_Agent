@@ -32,6 +32,18 @@ morning:
     - 'YC venture backed startup QA SDET 4 5 6 years India remote Hyderabad jobs'
     - 'site:jobs.ashbyhq.com QA automation engineer India remote 4 6 years'
     - 'site:jobs.lever.co OR site:job-boards.greenhouse.io SDET India remote startup 5 years'
+  # Y Combinator's "Work at a Startup" board (1,000+ live postings) has no
+  # public API of its own, unlike companies.yaml's board slugs. This calls a
+  # paid Apify actor (nomad-agent/ycombinator-was-scraper) instead - real
+  # money per run, capped server-side by max_total_charge_usd (Apify enforces
+  # this itself; nothing here tracks "remaining budget" locally). Requires
+  # APIFY_API_KEY. Verified 2026-09-20: $0.0025/job on the free account tier,
+  # so max_total_charge_usd: 0.15 with max_items: 40 costs at most $0.10/run.
+  apify_yc:
+    enabled: false
+    queries: ["QA", "SDET", "quality engineer", "software test engineer", "test automation"]
+    max_items: 40
+    max_total_charge_usd: 0.15
 
 llm:
   # PROVIDER. Researched and benchmarked 2026-08-20 for THIS workload

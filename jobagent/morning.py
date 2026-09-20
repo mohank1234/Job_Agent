@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import yaml
 
-from jobagent.models import Job
+from jobagent.models import Job, infer_workplace
 from jobagent.output import QA_TITLE, partition, make_workbook
 from jobagent.outreach.verification import board_ref, canonical, fetch_board, verify_row, csv_text, evidence_markdown, employer_posting, get_public
 from jobagent.runtime import atomic_json, now_iso, process_lock
@@ -190,6 +190,91 @@ def assess_boards(records, profile):
     return unique
 
 
+def assess_apify_leads(items, profile):
+    """Score Work at a Startup postings (via jobagent.enrich.apify_yc) with
+    the same classify()/rule_match() engine assess_boards uses for company
+    ATS boards - this is an additional source feeding the same pipeline, not
+    a separate/lesser scoring path. Skips the ATS-specific caveats
+    (workplaceType cross-check, gh_jid tracking, jobgether-intermediary
+    detection) verify_row applies, since none of those apply to this data;
+    keeps the generic ones (years-requirement, skill-gap, contract-role,
+    US-only-remote) that assess_boards also applies per row."""
+    from jobagent.roles import classify
+    from jobagent.matcher import rule_match
+    rows = []
+    for item in items:
+        job_id = str(item.get("id") or "").strip()
+        description = (item.get("description") or "").strip()
+        title, company = item.get("title") or "", item.get("company") or ""
+        if not job_id or not title or not company or len(description) < 200:
+            continue
+        url = f"https://www.workatastartup.com/jobs/{job_id}"
+        location = item.get("location") or ""
+        workplace = "remote" if item.get("isRemote") else infer_workplace(location)
+        job = Job(source="workatastartup", company=company, title=title, url=url,
+                  location=location, workplace=workplace, description=description,
+                  salary=item.get("salary") or "", raw=item)
+        job.apply_classification(classify(job, profile))
+        rule_match(job, profile)
+        fit = "in_scope" if job.candidate and job.match_category in ("A", "B", "C") else "out_of_scope"
+        caveats = list(job.classification_notes)
+        requirements = list(dict.fromkeys(re.findall(
+            r"\b\d{1,2}(?:\s*[-–—]\s*\d{1,2})?\+?(?:\s+or more)?\s+years?\b[^.\n]{0,130}", description, re.I)))
+        years = [int(re.match(r"\d+", text).group()) for text in requirements
+                 if re.search(r"experience|testing|automation|quality|QA|SDET", text, re.I)]
+        if years and max(years) > profile.years:
+            caveats.append(f"Posting includes a {max(years)}-year requirement; profile states approximately {profile.years:g} years. Review the full requirements.")
+            if fit == "in_scope":
+                fit = "needs_review"
+        if re.search(r"fixed.term|\bcontract\b", title, re.I):
+            caveats.append("Fixed-term/contract role; confirm duration, benefits and compensation")
+            if fit == "in_scope":
+                fit = "needs_review"
+        mentioned = [s for s in profile.all_skills if re.search(r"(?<!\w)" + re.escape(s) + r"(?!\w)", description, re.I)]
+        gaps = [s for s in profile.gaps if re.search(r"(?<!\w)" + re.escape(s) + r"(?!\w)", description, re.I)]
+        if gaps:
+            caveats.append("Known profile gaps mentioned in JD: " + ", ".join(gaps))
+            if fit == "in_scope":
+                fit = "needs_review"
+        row = {
+            "Company": company, "Job Title": title, "Location": location, "Job Link": url,
+            "JD Text": description, "Fit Status": fit, "Workplace": workplace,
+            "Fit Notes": "; ".join(caveats), "Profile Skills Mentioned": ", ".join(mentioned),
+            "Known Gaps Mentioned": ", ".join(gaps),
+            "Experience Requirements (source excerpts)": " | ".join(requirements),
+            "Requirements Excerpt (source)": "",
+            "Salary (source)": job.salary or "Not stated in structured source; check full JD",
+            "Listing Type": "Y Combinator Work at a Startup (verified live posting)",
+            "JD Status": "verified_live", "JD Verified At": now_iso(), "JD Source URL": url,
+            "JD SHA256": hashlib.sha256(description.encode()).hexdigest(),
+            "Rule Score": str(job.score), "Scoring Method": "rules", "Checked At": now_iso(),
+            "Verification Error": "", "Employer Job Link": item.get("companyWebsite") or url,
+            "Duplicate Listing URLs": "", "Location Variants": "",
+        }
+        focus, evidence = experience_focus(description)
+        row.update({"Experience Focus": focus, "Experience Evidence": evidence})
+        if focus != "4-6 year minimum":
+            if focus.startswith("Outside"):
+                row["Fit Status"] = "out_of_scope"
+            elif row["Fit Status"] == "in_scope":
+                row["Fit Status"] = "needs_review"
+            row["Fit Notes"] += "; " + focus
+        if (workplace == "remote" and re.search(r"\b(?:us|usa|united states)\b", location, re.I)
+                and not re.search(r"\bindia\b", location, re.I)):
+            row["Fit Status"] = "out_of_scope"
+            row["Fit Notes"] += "; Employer location restricts this remote posting to the US; India eligibility not established"
+        impact = re.findall(r"[^.\n]*(?:own|build|design|evaluation|quality strategy|release readiness)[^.\n]*", description, re.I)
+        row["Impact Evidence"] = " | ".join(s.strip()[:350] for s in impact[:3])
+        rows.append(row)
+    seen, unique = set(), []
+    for row in rows:
+        key = canonical(row["Job Link"])
+        if key not in seen:
+            unique.append(row)
+            seen.add(key)
+    return unique
+
+
 def augment_manifest(out, names):
     path = Path(out) / "deliverables.json"
     data = read_json(path, {"version": 1, "files": []})
@@ -296,6 +381,26 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     coverage = collect_boards(directory, run_dir / 'boards', workers=cfg.get('workers', 6), deadline=deadline, progress=progress)
     remaining(deadline)
     all_rows = assess_boards(coverage, profile)
+    apify_cfg = cfg.get('apify_yc', {})
+    if apify_cfg.get('enabled'):
+        remaining(deadline)
+        apify_path = run_dir / 'apify-yc.json'
+        if not apify_path.exists():
+            try:
+                from jobagent.enrich.apify_yc import fetch_yc_jobs
+                items = fetch_yc_jobs(apify_cfg.get('queries') or ['QA', 'SDET', 'quality engineer', 'software test engineer'],
+                                       max_items=apify_cfg.get('max_items', 40),
+                                       max_total_charge_usd=apify_cfg.get('max_total_charge_usd', 0.15))
+                atomic_json(apify_path, {'items': items, 'error': None, 'checked_at': now_iso()})
+            except Exception as exc:
+                atomic_json(apify_path, {'items': [], 'error': type(exc).__name__, 'checked_at': now_iso()})
+        apify_state = read_json(apify_path, {'items': [], 'error': None})
+        if apify_state.get('error'):
+            issues.append({'stage': 'apify_yc', 'error': apify_state['error']})
+        else:
+            apify_rows = assess_apify_leads(apify_state.get('items', []), profile)
+            all_rows.extend(apify_rows)
+            progress(f'Y Combinator Work at a Startup (via Apify): {len(apify_rows)} QA-relevant postings found.')
     from jobagent.report_quality import deduplicate_opportunities, resume_skill_text, review_frameworks
     resume_text = resume_skill_text(ROOT / 'resume' / 'resume_data.py')
     all_rows = [review_frameworks(r, resume_text) for r in all_rows]
