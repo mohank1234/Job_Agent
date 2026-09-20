@@ -237,6 +237,11 @@ def assess_apify_leads(items, profile):
             if fit == "in_scope":
                 fit = "needs_review"
         row = {
+            # Same baseline fields verify_row() initializes for every board
+            # row - company research and draft generation access some of
+            # these by direct key, so an Apify row must carry them too.
+            "Previous JD Claim": "", "Previous JD Status": "", "Contact Verification": "unverified",
+            "Contact Verified At": "", "Contact Source URL": "", "Content Status": "needs_review",
             "Company": company, "Job Title": title, "Location": location, "Job Link": url,
             "JD Text": description, "Fit Status": fit, "Workplace": workplace,
             "Fit Notes": "; ".join(caveats), "Profile Skills Mentioned": ", ".join(mentioned),
