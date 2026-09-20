@@ -29,6 +29,30 @@ def test_experience_wording_and_duplicate_notes():
     assert unique_notes('QA role; gap; QA role','gap; more')=='QA role; gap; more'
 
 
+def test_open_ended_plus_requirement_below_window_qualifies_when_within_years():
+    text = 'Requirements: 3+ years of QA automation experience required.'
+    # Old behavior (no years passed) is unchanged - a 3+ stated minimum below
+    # the 4-6 focus window is still excluded without knowing the candidate's
+    # actual experience.
+    assert experience_focus(text)[0] == 'Outside 4-6 year focus'
+    # A 5-year candidate plainly satisfies "3+ years" even though 3 is below
+    # the window - this must now count as in-focus.
+    assert experience_focus(text, years=5)[0] == '4-6 year minimum'
+    assert experience_focus('Requirements: 4+ years of QA experience.', years=5)[0] == '4-6 year minimum'
+
+
+def test_open_ended_plus_requirement_above_candidate_years_still_excluded():
+    # "9+ years" is not satisfied by a 5-year candidate - the plus-rescue
+    # must not blindly accept every open-ended number.
+    assert experience_focus('Requirements: 9+ years of QA experience.', years=5)[0] == 'Outside 4-6 year focus'
+
+
+def test_bounded_range_without_plus_still_judged_strictly():
+    # A bounded (non-open-ended) range below the window is not rescued by
+    # the plus rule even for a 5-year candidate - only an explicit "X+" is.
+    assert experience_focus('Requirements: 1-3 years of QA experience.', years=5)[0] == 'Outside 4-6 year focus'
+
+
 def test_corrected_boards_and_phonepe_public_status(monkeypatch):
     from jobagent import morning
     directory=morning.board_directory({'greenhouse':['phonepe','ocrolus']})

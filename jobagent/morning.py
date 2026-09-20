@@ -25,7 +25,7 @@ BOARD_URLS = {"greenhouse": "https://job-boards.greenhouse.io/{}/jobs",
               "phonepe": "https://www.phonepe.com/careers/job-openings/"}
 BOARD_ALIASES = {('greenhouse','ocrolus'):('greenhouse','ocrolusinc'),
                  ('greenhouse','phonepe'):('phonepe','phonepe')}
-EXPERIENCE = re.compile(r"(?<![\d.])(\d{1,2})(?:\s*(?:[-\u2013\u2014]|to)\s*(\d{1,2}))?\s*\+?\s*(?:years?|yrs?)\b", re.I)
+EXPERIENCE = re.compile(r"(?<![\d.])(\d{1,2})(?:\s*(?:[-\u2013\u2014]|to)\s*(\d{1,2}))?\s*(\+)?\s*(?:years?|yrs?)\b", re.I)
 
 
 def in_window(now):
@@ -40,8 +40,16 @@ def read_json(path, default):
     return json.loads(Path(path).read_text(encoding="utf-8")) if Path(path).exists() else default
 
 
-def experience_focus(text, low=4, high=6):
-    """Minimum experience, not a coincidental years count in a company bio."""
+def experience_focus(text, low=4, high=6, years=None):
+    """Minimum experience, not a coincidental years count in a company bio.
+
+    An explicit open-ended "X+ years" requirement is satisfied whenever the
+    candidate's own `years` meet or exceed X, even if X itself falls below
+    the low-high focus window - "3+ years" plainly includes a 5-year
+    candidate. A bounded range like "4-6 years" (no plus) or a plain number
+    is still judged strictly against low-high, unchanged. Pass `years` to
+    enable this; omitting it preserves the old strict-window-only behavior.
+    """
     heading = re.search(r"(?:requirements|qualifications|what you.ll (?:need|bring)|what we.re looking for)", text, re.I)
     portion = text[heading.start():] if heading else text
     general, specialist = [], []
@@ -55,7 +63,8 @@ def experience_focus(text, low=4, high=6):
         context = excerpt.lower()
         if not re.search(r"experience|\bqa\b|\bsdet\b|testing|quality assurance|quality engineering|test automation", context):
             continue
-        record = (int(m.group(1)), excerpt[:260])
+        open_ended = bool(m.group(3)) and not m.group(2)  # "X+", not a bounded "X-Y" range
+        record = (int(m.group(1)), excerpt[:260], open_ended)
         if re.search(r"professional|overall|total|software (?:quality|testing|test|engineering)|quality (?:assurance|engineering)|automated testing|\bqa\b|\bsdet\b|test (?:engineering|automation)", context):
             general.append(record)
         elif re.search(r"python|java|typescript|playwright|selenium|aws|leadership|manag", context):
@@ -63,10 +72,14 @@ def experience_focus(text, low=4, high=6):
         elif "experience" in context:
             general.append(record)
     if not general:
-        return "Not stated clearly", " | ".join(v for _, v in specialist)
-    minimum = max(n for n, _ in general)
-    evidence = " | ".join(dict.fromkeys(v for _, v in general))
-    return ("4-6 year minimum" if low <= minimum <= high else "Outside 4-6 year focus"), evidence
+        return "Not stated clearly", " | ".join(v for _, v, _ in specialist)
+    minimum = max(n for n, _, _ in general)
+    evidence = " | ".join(dict.fromkeys(v for _, v, _ in general))
+    if low <= minimum <= high:
+        return "4-6 year minimum", evidence
+    if years is not None and minimum <= years and any(n == minimum and open_ended for n, _, open_ended in general):
+        return "4-6 year minimum", evidence
+    return "Outside 4-6 year focus", evidence
 
 
 def board_directory(companies, extra_urls=()):
@@ -170,7 +183,7 @@ def assess_boards(records, profile):
             if re.search(r'(?:role|position) (?:is )?(?:open|available|based)[^.]{0,60}(?:across most of the US|United States only|US only)', job.description, re.I):
                 row['Fit Status'] = 'out_of_scope'
                 row['Fit Notes'] += '; JD explicitly restricts remote hiring to the US'
-            focus, evidence = experience_focus(job.description)
+            focus, evidence = experience_focus(job.description, years=profile.years)
             row.update({"Experience Focus": focus, "Experience Evidence": evidence})
             if focus != "4-6 year minimum":
                 if focus.startswith("Outside"):
@@ -256,7 +269,7 @@ def assess_apify_leads(items, profile):
             "Verification Error": "", "Employer Job Link": item.get("companyWebsite") or url,
             "Duplicate Listing URLs": "", "Location Variants": "",
         }
-        focus, evidence = experience_focus(description)
+        focus, evidence = experience_focus(description, years=profile.years)
         row.update({"Experience Focus": focus, "Experience Evidence": evidence})
         if focus != "4-6 year minimum":
             if focus.startswith("Outside"):
