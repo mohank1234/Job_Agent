@@ -23,6 +23,10 @@ on:
         description: 'Force a real run right now (ignore the 06:00-11:00 IST window and "already done today" check). Testing only.'
         type: boolean
         default: false
+      validate_only:
+        description: 'Check saved setup and Google connections without searching, sending emails, or saving a checkpoint.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -84,11 +88,12 @@ jobs:
         run: python -m jobagent.cloud_state prepare
 
       - name: Reset today's completion marker (manual force-run only)
-        if: github.event.inputs.force_run == 'true'
+        if: github.event.inputs.force_run == 'true' && github.event.inputs.validate_only != 'true'
         run: python -c "import json,pathlib; from datetime import datetime,timezone,timedelta; p=pathlib.Path('research/morning-private/ledger.json'); d=json.loads(p.read_text()) if p.exists() else {'version':1,'days':{}}; key=(datetime.now(timezone.utc)+timedelta(hours=5,minutes=30)).date().isoformat(); d['days'].pop(key, None); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(d)); print('reset', key)"
 
       - name: Run morning pipeline
         id: morning
+        if: github.event.inputs.validate_only != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
@@ -116,18 +121,18 @@ jobs:
           fi
 
       - name: Send daily results email
-        if: steps.morning.outcome == 'success'
+        if: steps.morning.outcome == 'success' && github.event.inputs.validate_only != 'true'
         run: python tools/send_run_email.py
 
       - name: Encrypt persistent state
         id: encrypted
-        if: always() && steps.prepared.outcome == 'success'
+        if: always() && steps.prepared.outcome == 'success' && github.event.inputs.validate_only != 'true'
         env:
           JOBAGENT_STATE_KEY: ${{ secrets.JOBAGENT_STATE_KEY }}
         run: python -m jobagent.cloud_state save
 
       - name: Save encrypted state for next run
-        if: always() && steps.encrypted.outcome == 'success'
+        if: always() && steps.encrypted.outcome == 'success' && github.event.inputs.validate_only != 'true'
         uses: actions/cache/save@v4
         with:
           path: .jobagent-state.enc
@@ -139,7 +144,7 @@ jobs:
       # Settings -> Notifications -> Actions) is the independent backup for
       # exactly that case.
       - name: Send failure alert email
-        if: failure()
+        if: failure() && github.event.inputs.validate_only != 'true'
         continue-on-error: true
         env:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

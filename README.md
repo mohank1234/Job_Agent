@@ -30,6 +30,24 @@ are rebuilt from the private resume source; connections and attachment format
 are checked before the pipeline. Drive failures fail the run and preserve its
 checkpoint for retry rather than showing a successful publication.
 
+If Actions reports expired or revoked Google consent, reconnect locally and
+replace both Actions token secrets from PowerShell:
+
+```powershell
+python run.py drive-auth
+python run.py gmail-auth
+Get-Content -LiteralPath .\drive_token.json -Raw | gh secret set DRIVE_TOKEN_JSON --repo mohank1234/Job_Agent
+Get-Content -LiteralPath .\token.json -Raw | gh secret set GMAIL_TOKEN_JSON --repo mohank1234/Job_Agent
+gh workflow run daily-job-search.yml --repo mohank1234/Job_Agent -f validate_only=true
+```
+
+Complete Google consent with the configured output account. The validation run
+checks the saved setup and Google connections without searching, sending email,
+or replacing the checkpoint; it takes precedence over `force_run` if both are
+selected. If the OAuth app is External and still in **Testing**, Google expires
+refresh tokens for these scopes after seven days. Check its publishing status
+before reconnecting; see [Google's refresh-token expiration rules](https://developers.google.com/identity/protocols/oauth2#expiration).
+
 The morning workflow uses the configured research model (currently Gemini),
 and composes outreach from actual resume bullets and the current JD. It never
 sends messages. All drafts require user approval; LinkedIn notes are at most
