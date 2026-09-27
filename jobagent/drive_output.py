@@ -123,6 +123,10 @@ class Publisher:
             token = result.get("nextPageToken")
             if not token:
                 break
+        # Files the user edited were left in place when a fresh copy replaced
+        # them; they still carry our appProperties but are no longer managed.
+        superseded = set(self.state.get("superseded", {}).get(role, []))
+        files = [f for f in files if f["id"] not in superseded]
         if len(files) > 1:
             raise DriveOutputError(f"Multiple managed {role} files found; resolve the duplicate IDs before publishing")
         return files[0] if files else None
@@ -157,6 +161,15 @@ class Publisher:
         entry.update(id=result["id"], create_pending=False)
         self.save()
         return result
+
+    def start_fresh(self, role, meta):
+        """The Drive copy has edits this app did not make. Leave that file
+        exactly as it is (never overwrite someone's changes) and publish to a
+        new file instead, so a manual edit can't stall every later run."""
+        self.state.setdefault("superseded", {}).setdefault(role, []).append(meta["id"])
+        self.state["files"][role] = {}
+        self.save()
+        return None
 
     def ensure_folder(self, name="JobAgent Output"):
         meta = self.existing("folder")
@@ -235,7 +248,8 @@ class Publisher:
                 return meta["id"]
             allowed = {v for v in (entry.get("grid_digest"), entry.get("pending_digest")) if v}
             if observed not in allowed:
-                raise DriveOutputError("The report contains unrecognized edits. Preserving them; review the report before replacing it.")
+                meta = self.start_fresh(role, meta)
+                entry = self.state["files"][role]
         entry["pending_digest"] = digest
         self.save()
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=XLSX_MIME, resumable=False)
@@ -267,7 +281,8 @@ class Publisher:
                 self.save()
                 return meta["id"]
             if observed not in {v for v in (entry.get("content_digest"), entry.get("pending_digest")) if v}:
-                raise DriveOutputError(f"Preserving unrecognized edits in {path.name}; publication stopped")
+                meta = self.start_fresh(role, meta)
+                entry = self.state["files"][role]
         entry["pending_digest"] = digest
         self.save()
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)

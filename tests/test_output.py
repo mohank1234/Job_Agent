@@ -268,11 +268,19 @@ def test_user_edits_are_preserved(tmp_path):
     bundle(tmp_path)
     result = Publisher(drive, tmp_path / "state.json").publish(tmp_path)
     sheet = result["sheet_id"]
-    drive.items[sheet]["data"] = report_bytes(Company="User's manual note")
+    edited = report_bytes(Company="User's manual note")
+    drive.items[sheet]["data"] = edited
     bundle(tmp_path, report_bytes(Company="New generated output"))
-    with pytest.raises(DriveOutputError, match="unrecognized edits"):
-        Publisher(drive, tmp_path / "state.json").publish(tmp_path)
-    assert drive.updates == 0
+    fresh = Publisher(drive, tmp_path / "state.json").publish(tmp_path)
+    # The edited sheet is left exactly as the user left it...
+    assert drive.items[sheet]["data"] == edited
+    # ...and the new output goes to a fresh file instead of stalling the run.
+    assert fresh["sheet_id"] != sheet
+    # Later runs keep publishing to the fresh file, not the superseded one.
+    bundle(tmp_path, report_bytes(Company="Next day output"))
+    again = Publisher(drive, tmp_path / "state.json").publish(tmp_path)
+    assert again["sheet_id"] == fresh["sheet_id"]
+    assert drive.items[sheet]["data"] == edited
 
 
 def test_readback_mismatch_does_not_claim_publication(tmp_path):
