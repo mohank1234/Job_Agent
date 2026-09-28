@@ -21,7 +21,7 @@ from jobagent.outreach.service import recent
 from jobagent.outreach.verification import canonical, get_public
 from jobagent.models import clean_html
 
-STYLE_VERSION = 8
+STYLE_VERSION = 9
 EMAIL = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])", re.I)
 BROKERS = ('rocketreach', 'apollo.io', 'contactout', 'signalhire', 'leadiq', 'zoominfo', 'lusha', 'wiza.co')
 META = ['Startup Priority', 'Investor Backing', 'YC Batch', 'Investment Source',
@@ -228,155 +228,184 @@ def research_company(row, cache_dir, provider, *, seed=None, deadline=None, sear
     return data
 
 
-def jd_skills(row, facts, limit=4):
-    """Skills the job description names that the resume also contains, as the
-    resume writes them; never a skill the resume lacks."""
-    if facts.get('resume'):
-        from jobagent.outreach.tailored_resume import ats_match
-        matched = ats_match(row.get('JD Text', ''), facts['resume'])['matched'][:limit]
+def _resume_text(facts):
+    return ' '.join([facts.get('summary', ''), *facts.get('bullets', []),
+                     *[f'{a} {b}' for a, b in (facts.get('resume') or {}).get('SKILLS', [])]]).lower()
+
+
+def _has(term, text):
+    return re.search(r'(?<![a-z0-9])' + re.escape(term.lower()) + r'(?![a-z0-9])', text) is not None
+
+
+def _join(items):
+    items = list(items)
+    if len(items) <= 2:
+        return ' and '.join(items)
+    return ', '.join(items[:-1]) + ', and ' + items[-1]
+
+
+# Tools the "automation experience" sentence can name, in the order used when
+# neither the job description nor the product suggests otherwise. Each is
+# named only when the resume contains it.
+TOOLS = ['Selenium', 'Playwright', 'Java', 'TestNG', 'Postman', 'SQL', 'Rest Assured', 'Python', 'Jenkins',
+         'Docker', 'JMeter']
+# Product areas, from the company's own listing (tags, industries, one-liner):
+# (pattern, phrase for the opening line, tools to lead with, recent-work key).
+AREAS = [
+    (r'\b(?:voice|speech|call|conversational|chat|chatbot|whatsapp)\b', 'conversational and voice AI',
+     ['Playwright', 'Python', 'Postman'], 'voice'),
+    (r'\b(?:ai|llm|agents?|agentic|generative|gpt|copilot|rag|machine learning|ml)\b', 'AI products',
+     ['Playwright', 'Python', 'Postman'], 'ai'),
+    (r'\b(?:fintech|payments?|banking|lending|credit|card|financial|insurance|insurtech|accounting)\b',
+     'financial products', ['Postman', 'Rest Assured', 'SQL'], 'api'),
+    (r'\b(?:health|healthcare|medical|clinic|diagnostic|pharma|wellness)\b', 'healthcare technology',
+     ['Selenium', 'Postman', 'SQL'], 'api'),
+    (r'\b(?:edtech|education|learning|students?|courses?)\b', 'education technology',
+     ['Selenium', 'Playwright', 'Postman'], 'automation'),
+    (r'\b(?:vision|camera|image|video|ocr)\b', 'computer vision', ['Python', 'Selenium', 'Postman'], 'vision'),
+    (r'\b(?:api|apis|developer|devtools|infrastructure|platform|saas|b2b)\b', 'B2B software',
+     ['Postman', 'Rest Assured', 'Playwright'], 'api'),
+    (r'\b(?:e-?commerce|marketplace|retail|consumer|d2c)\b', 'consumer products',
+     ['Selenium', 'Playwright', 'Postman'], 'automation'),
+]
+# "More recently, I've been ..." - each needs every listed resume term.
+RECENT_WORK = {
+    'ai': (('agentic', 'promptfoo', 'deepeval'),
+           "testing agentic AI systems{domain}, validating accuracy, grounding, hallucinations, and response "
+           "quality using tools such as Promptfoo and DeepEval, along with precision and recall-based evaluation"),
+    'voice': (('voice bot', 'speech'),
+              "testing conversational AI and voice bot flows, validating intent recognition, response quality, "
+              "and speech-to-text accuracy, alongside agentic AI evaluation"),
+    'api': (('postman', 'rest assured', 'sql'),
+            "automating API regression suites with Postman and Rest Assured and validating backend data integrity "
+            "with SQL across releases"),
+    'vision': (('computer vision', 'camera'),
+               "validating computer vision and event-detection systems across a large camera deployment, "
+               "including edge-case and failure analysis"),
+    'automation': (('selenium', 'page object'),
+                   "building and maintaining a Selenium automation framework with Page Object Model and "
+                   "data-driven tests, integrated into CI/CD"),
+}
+
+
+def _profile(text):
+    """(area phrase, lead tools, recent-work key) for a company's text."""
+    for pattern, phrase, lead, recent in AREAS:
+        if re.search(pattern, text or '', re.I):
+            return phrase, lead, recent
+    return '', [], 'automation'
+
+
+def email_tools(jd_text, company_text, facts, limit=6):
+    """Tools the resume has, JD-named ones first, then those suiting the product."""
+    resume = _resume_text(facts)
+    jd = (jd_text or '').lower()
+    _phrase, lead, _recent = _profile(company_text)
+    available = [t for t in TOOLS if _has(t, resume)]
+    ordered = ([t for t in available if jd and _has(t, jd)] + [t for t in lead if t in available] + available)
+    return list(dict.fromkeys(ordered))[:limit]
+
+
+def recent_work(jd_text, company_text, facts):
+    """The resume-backed recent work closest to the job or product."""
+    resume = _resume_text(facts)
+    key = _profile((jd_text or '') + ' ' + (company_text or ''))[2] if jd_text else _profile(company_text)[2]
+    for candidate in (key, 'ai', 'automation'):
+        needs, text = RECENT_WORK[candidate]
+        if all(n in resume for n in needs):
+            domain = ' in the insurance domain' if candidate == 'ai' and 'insurance' in resume else ''
+            return text.format(domain=domain)
+    return ''
+
+
+def signoff_for(role):
+    """Founders, CEOs, VPs and directors: "Best regards"; CTO, engineering and
+    QA leads: "Regards"; recruiters: "Thanks & regards"."""
+    role = role or ''
+    if re.search(r'recruit|talent|hiring', role, re.I):
+        return 'Thanks & regards'
+    if re.search(r'founder|\bceo\b|chief executive|\bvp\b|vice president|director|\bpresident\b', role, re.I):
+        return 'Best regards'
+    if re.search(r'\bcto\b|chief technolog|engineering|\bqa\b|quality', role, re.I):
+        return 'Regards'
+    return 'Best regards'
+
+
+def compose_email(*, name, role, company, facts, title='', jd_text='', company_text='', proactive=False):
+    """Hi / well-wishing line / why I'm writing / experience and tools /
+    recent work / the ask / sign-off. Every claim comes from the resume; the
+    company is described only by its own listing or job description."""
+    years = re.search(r'\bwith\s+(\d+(?:\.\d+)?)\s+years?\s+of\s+experience', facts.get('summary', ''), re.I)
+    years = years[1] if years else ''
+    area = _profile(company_text)[0]
+    attached = facts.get('resume_attached', False)
+    resume_line = "I've attached my resume for reference." if attached else "I'd be happy to share my resume."
+    if proactive:
+        why = (f'I came across {company}' + (f' and your work on {area}' if area else '')
+               + ', and wanted to reach out regarding potential Senior QA or SDET opportunities on your team.')
+        ask = f"I'd be interested to know if you currently have, or expect to have, a need for QA/SDET expertise. {resume_line}"
+    elif re.search(r'recruit|talent|hiring', role or '', re.I):
+        why = f"I'm writing to express my interest in the {title} role at {company}."
+        ask = f"I'd appreciate being considered for the role. {resume_line}"
     else:
-        matched = []
-    if len(matched) <= 1:
-        return ''.join(matched)
-    return ', '.join(matched[:-1]) + ' and ' + matched[-1]
-
-
-def evidence_sentence(bullet):
-    """One resume bullet as a sentence: "Built X." -> "For example, I built X." """
-    bullet = (bullet or '').strip().rstrip('.')
-    if not bullet:
-        return ''
-    if len(bullet) > 1 and bullet[0].isupper() and bullet[1].islower():
-        bullet = bullet[0].lower() + bullet[1:]
-    return f'For example, I {bullet}.'
+        why = f'I came across the {title} role at {company} and wanted to reach out directly.'
+        ask = f"I'd welcome the chance to discuss how I could contribute to the role. {resume_line}"
+    tools = email_tools(jd_text, company_text, facts)
+    experience = (f"I'm a QA Engineer" + (f' with {years} years of experience' if years else '')
+                  + ' across manual testing, automation, API testing, and AI/LLM validation.'
+                  + (f' My automation experience includes {_join(tools)}.' if tools else ''))
+    recent = recent_work(jd_text, company_text, facts)
+    paragraphs = [why, experience] + ([f"More recently, I've been {recent}."] if recent else []) + [ask]
+    body = f"Hi {name},\n\nI hope you're doing well.\n\n" + '\n\n'.join(paragraphs)
+    body += f"\n\n{signoff_for(role)},\n{facts['name']}"
+    if facts.get('phone'):
+        body += '\n' + str(facts['phone']).strip()
+    return body
 
 
 def recipient_template(row, metadata, facts, company, evidence=''):
-    """Greeting, a well-wishing line, two paragraphs and a sign-off, pitched
-    to who is reading: a CTO gets technical fit, a founder/CEO the direct
-    outreach version, a recruiter a plain application."""
+    """An email about a specific opening, pitched to who is reading."""
     title = row['Job Title'].strip()
     contact = metadata.get('Email Contact Name') or metadata.get('Manager Name') or ''
     name = contact.split()[0] if contact else f'{company} team'
     role = (metadata.get('Email Contact Role') if metadata.get('Email Contact Name') else metadata.get('Manager Role')) or ''
-    attached = facts.get('resume_attached', False)
-    years = re.search(r'\bwith\s+(\d+(?:\.\d+)?)\s+years?\s+of\s+experience', facts.get('summary', ''), re.I)
-    me = f'a QA engineer with {years[1]} years of experience' if years else 'a QA engineer'
-    skills = jd_skills(row, facts)
-    example = evidence_sentence(evidence)
     if re.search(r'\bcto\b|chief technology', role, re.I):
-        template, signoff = '4 - CTO, technical fit', 'Regards'
-        subject = f'{title} role at {company}'
-        p1 = f"I'm reaching out about the {title} role at {company}. I'm {me}" + (
-            f', and my work matches what the role asks for: {skills}.' if skills else '.')
-        ask = ("I've attached a resume tailored to this role. Would you be open to a short conversation, "
-               "or pointing me to the right person on your team?") if attached else (
-               "Would you be open to a short conversation? I'd be happy to share my resume.")
+        template, subject = '4 - CTO, technical fit', f'{title} role at {company}'
     elif re.search(r'\b(?:ceo|chief executive|founder|co-founder)\b', role, re.I):
-        template, signoff = '1 - Founder or CEO, direct outreach', 'Best regards'
-        subject = f'Interested in the {title} opening at {company}'
-        p1 = (f'I came across the {title} opening at {company} and wanted to reach out to you directly. '
-              f"I'm {me}" + (f', with hands-on work in {skills}.' if skills else '.'))
-        ask = (f"I'd love to help {company} keep its releases reliable as the team grows. I've attached my resume "
-               "for this role; would you be open to passing it to the hiring manager, or to a quick chat?") if attached else (
-               f"I'd love to help {company} keep its releases reliable as the team grows. Would you be open to a quick chat? "
-               "I'd be happy to share my resume.")
+        template, subject = '1 - Founder or CEO, direct outreach', f'Interested in the {title} opening at {company}'
     elif re.search(r'\b(?:vp|vice president|director)\b', role, re.I):
-        template, signoff = '8 - Director or VP, advertised role', 'Best regards'
-        subject = f'Interest in {title} at {company}'
+        template, subject = '8 - Director or VP, advertised role', f'Interest in {title} at {company}'
         job_id = str(row.get('Job ID') or '')
         if re.fullmatch(r'[A-Za-z0-9_-]{1,80}', job_id):
             subject += ' - ' + job_id
-        p1 = f"I came across the {title} opening at {company}. I'm {me}" + (f', working with {skills}.' if skills else '.')
-        ask = ("Would you be open to passing my attached resume, tailored to this role, to the hiring manager?" if attached
-               else "Could you connect me with the hiring manager? I'd be happy to share my resume.")
     elif re.search(r'\b(?:qa|quality)\b', role, re.I) and re.search(r'manager|head|lead', role, re.I):
-        template, signoff = '5 - QA manager, relevant experience', 'Regards'
-        subject = f'Interested in joining your QA team at {company}'
-        p1 = f"I'm interested in joining your QA team as {title}. I'm {me}" + (f', working with {skills}.' if skills else '.')
-        ask = ("I've attached a resume tailored to this role and would welcome the chance to discuss it." if attached
-               else "I'd be happy to share my resume and discuss the role.")
+        template, subject = '5 - QA manager, relevant experience', f'Interested in joining your QA team at {company}'
     elif re.search(r'recruit|talent|hiring', role, re.I):
-        template, signoff = '3 - Recruiter, direct application', 'Thanks & regards'
-        subject = f'Application for {title} - {facts["name"]}'
-        p1 = f"I'd like to be considered for the {title} role at {company}. I'm {me}" + (
-            f', with experience in {skills}.' if skills else '.')
-        ask = ("My resume, tailored to this role, is attached. I'd be glad to discuss next steps." if attached
-               else "I'd be happy to share my resume and discuss next steps.")
+        template, subject = '3 - Recruiter, direct application', f'Application for {title} - {facts["name"]}'
     else:
-        template, signoff = '6 - Engineering leader or team, advertised role', 'Regards'
-        subject = f'QA opening on your team at {company}'
-        p1 = f"I noticed {company} is hiring for {title}. I'm {me}" + (f', working with {skills}.' if skills else '.')
-        ask = ("I've attached a resume tailored to this role and would appreciate being connected with the right person."
-               if attached else "I'd be happy to share my resume and would appreciate being connected with the right person.")
-    p2 = f'{example} {ask}'.strip()
-    body = f"Hi {name},\n\nI hope you're doing well.\n\n{p1}\n\n{p2}\n\n{signoff},\n{facts['name']}"
-    if facts.get('phone'):
-        body += '\n' + str(facts['phone']).strip()
+        template, subject = '6 - Engineering leader or team, advertised role', f'QA opening on your team at {company}'
+    company_text = ' '.join(str(row.get(k) or '') for k in ('Company Description', 'Region'))
+    body = compose_email(name=name, role=role, company=company, facts=facts, title=title,
+                         jd_text=row.get('JD Text', ''), company_text=row.get('JD Text', '') + ' ' + company_text)
     return subject, body, template
-
-
-# Skill areas a proactive email can mention: (words in the startup's own
-# description that make the area relevant, resume terms that must all be
-# present, how the email says it). Only the most relevant two or three are used.
-PROACTIVE_AREAS = [
-    (r'\b(?:ai|llm|agents?|agentic|generative|gpt|model|ml|copilot|rag)\b', ('llm evaluation', 'agent'),
-     'LLM and AI agent evaluation'),
-    (r'\b(?:voice|chat|chatbot|conversational|whatsapp|speech|call)\b', ('voice bot', 'speech'),
-     'chatbot and voice bot testing'),
-    (r'\b(?:api|apis|platform|developer|integration|payments?|fintech|infrastructure|b2b|saas)\b', ('postman', 'rest assured'),
-     'API testing with Postman and Rest Assured'),
-    (r'\b(?:data|analytics|payments?|fintech|financial|banking|ledger)\b', ('sql',), 'SQL data validation'),
-    (r'\b(?:scale|real-time|realtime|latency|infrastructure|high-traffic)\b', ('jmeter',), 'JMeter performance testing'),
-    (r'\b(?:vision|camera|image|video|ocr)\b', ('computer vision',), 'computer vision testing'),
-]
-AUTOMATION_AREA = (('selenium', 'playwright', 'testng'), 'Selenium, Playwright and TestNG automation')
-
-
-def proactive_areas(company_text, facts, limit=3):
-    resume = ' '.join([facts.get('summary', ''), *facts.get('bullets', []),
-                       *[f'{a} {b}' for a, b in (facts.get('resume') or {}).get('SKILLS', [])]]).lower()
-    text = (company_text or '').lower()
-    areas = [phrase for pattern, needs, phrase in PROACTIVE_AREAS
-             if re.search(pattern, text) and all(n in resume for n in needs)]
-    needs, phrase = AUTOMATION_AREA
-    if len(areas) < limit and all(n in resume for n in needs):
-        areas.append(phrase)
-    return areas[:limit]
 
 
 def proactive_draft(company, contact, facts):
     """A short cold email to a startup's founder/CTO/CEO when it has no
-    current QA opening: who I am, the few skills that fit its product, and
-    whether a QA/SDET need exists now or soon. Company facts come only from
-    its own directory listing (`one_liner`, tags)."""
+    current QA opening. The company is described only from its own directory
+    listing (one-liner, tags, industries)."""
     name = company['name']
     first = (contact.get('Email Contact Name') or '').split()[0] if contact.get('Email Contact Name') else f'{name} team'
     role = contact.get('Email Contact Role', '')
     text = ' '.join([company.get('one_liner', ''), company.get('description', ''), *company.get('tags', []),
                      *company.get('industries', [])])
-    areas = proactive_areas(text, facts)
-    skills = areas[0] if len(areas) == 1 else ', '.join(areas[:-1]) + ' and ' + areas[-1] if areas else ''
-    years = re.search(r'\bwith\s+(\d+(?:\.\d+)?)\s+years?\s+of\s+experience', facts.get('summary', ''), re.I)
-    me = f'a QA engineer with {years[1]} years of experience' if years else 'a QA engineer'
-    words = set(re.findall(r'[a-z][a-z0-9+]{2,}', text.lower()))
-    bullet = max(facts.get('bullets') or [''], key=lambda b: (len(set(re.findall(r'[a-z][a-z0-9+]{2,}', b.lower())) & words), -len(b)))
-    about = f' ({company["one_liner"].strip().rstrip(".")})' if company.get('one_liner') else ''
-    signoff = 'Regards' if re.search(r'\bcto\b|chief technology|engineering', role, re.I) else 'Best regards'
-    p1 = (f'I came across {name}{about} and wanted to reach out directly. I\'m {me}'
-          + (f', most recently in {skills},' if skills else ',') + ' and I\'m exploring Senior QA and SDET opportunities.')
-    ask = ('Do you currently have, or expect to have, a need for QA or SDET support on your team? '
-           + ("I've attached my resume in case it's useful." if facts.get('resume_attached') else "I'd be happy to share my resume."))
-    p2 = f'{evidence_sentence(bullet)} {ask}'.strip()
-    body = f"Hi {first},\n\nI hope you're doing well.\n\n{p1}\n\n{p2}\n\n{signoff},\n{facts['name']}"
-    if facts.get('phone'):
-        body += '\n' + str(facts['phone']).strip()
-    return {'Cold Email Subject': f'QA / SDET experience for {name}', 'Cold Email': body,
+    body = compose_email(name=first, role=role, company=name, facts=facts, company_text=text, proactive=True)
+    return {'Cold Email Subject': f'Senior QA / SDET opportunities at {name}', 'Cold Email': body,
             'Email Template': '9 - Proactive, no current QA opening',
-            'LinkedIn Note': (f'Hi {first}, I came across {name} and I\'m a QA engineer exploring QA/SDET roles. '
-                              'Open to connecting?')[:300],
+            'LinkedIn Note': (f"Hi {first}, I came across {name} and I'm a QA engineer exploring Senior QA/SDET "
+                              'opportunities. Open to connecting?')[:300],
             'Approval Status': 'Pending user approval; do not send',
-            'Draft Generation': 'Proactive outreach from the startup\'s directory listing and exact resume evidence; unsent',
+            'Draft Generation': "Proactive outreach from the startup's directory listing and exact resume evidence; unsent",
             'Why This Role': 'No current QA opening found; proactive outreach', 'Requirements To Confirm': ''}
 
 

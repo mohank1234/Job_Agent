@@ -159,8 +159,8 @@ def test_drafts_grounded_cached_and_approval_pending(tmp_path):
     facts = {'name':'Candidate', 'phone':'5550101234', 'bullets':['Built Selenium regression tests from scratch.', 'Wrote API tests with Rest Assured.']}
     draft, reused = cached_draft(row, {}, facts, tmp_path)
     assert not reused
-    assert 'For example, I built Selenium regression tests from scratch.' in draft['Cold Email']
-    assert draft['Cold Email'].endswith('Regards,\nCandidate\n5550101234')
+    assert "I'm a QA Engineer" in draft['Cold Email'] and 'For example' not in draft['Cold Email']
+    assert draft['Cold Email'].endswith('Best regards,\nCandidate\n5550101234')
     assert draft['Cold Email'].count('5550101234') == 1
     assert '5550101234' not in draft['LinkedIn Note']
     assert len(draft['LinkedIn Note']) <= 300
@@ -386,7 +386,8 @@ def test_startup_without_opening_gets_one_proactive_draft_to_its_verified_cto(tm
     assert row['Draft Status'].startswith('Draft only; proactive enquiry')
     assert row['Email Template'].startswith('9 - Proactive')
     assert row['Cold Email'].startswith('Hi Cai,\n\nI hope you\'re doing well.')
-    assert 'AI agents for support teams' in row['Cold Email'] and row['Cold Email'].endswith('Candidate\n8897404807')
+    assert 'I came across Beta and your work on AI products' in row['Cold Email']
+    assert "need for QA/SDET expertise" in row['Cold Email'] and row['Cold Email'].endswith('Candidate\n8897404807')
     assert row['Resume File'].endswith('Candidate_Senior_QA_SDET_5Yrs.pdf') and (out/row['Resume File']).is_file()
     assert summary['proactive_enquiries'] == 1 and summary['startups_checked'] == 1
     assert lookups == ['beta.io']
@@ -414,11 +415,11 @@ RESUME = {'NAME': 'CANDIDATE', 'TAGLINE': 'QA Engineer', 'CONTACT': ['City'], 'E
 
 
 @pytest.mark.parametrize('role,number,signoff,phrase',[
-    ('Founder and CEO','1','Best regards','wanted to reach out to you directly'),
-    ('Chief Technology Officer','4','Regards','my work matches what the role asks for'),
-    ('Technical Recruiter','3','Thanks & regards',"I'd like to be considered"),
-    ('Vice President of Engineering','8','Best regards','passing my attached resume'),
-    ('QA Manager','5','Regards','joining your QA team'),
+    ('Founder and CEO','1','Best regards','I came across the QA Engineer role at Example'),
+    ('Chief Technology Officer','4','Regards','I came across the QA Engineer role at Example'),
+    ('Technical Recruiter','3','Thanks & regards',"I'm writing to express my interest in the QA Engineer role"),
+    ('Vice President of Engineering','8','Best regards','discuss how I could contribute to the role'),
+    ('QA Manager','5','Regards','discuss how I could contribute to the role'),
 ])
 def test_email_format_follows_the_reader(role,number,signoff,phrase):
     row={'Company':'Example','Job Title':'QA Engineer','JD Text':'We need Playwright, Python and Postman. Cypress is a plus.'}
@@ -427,14 +428,17 @@ def test_email_format_follows_the_reader(role,number,signoff,phrase):
     metadata={'Manager Name':'Alex Leader','Manager Role':'CEO','Email Contact Name':'Sam Contact','Email Contact Role':role}
     draft=grounded_draft(row,metadata,facts)
     assert draft['Email Template'].startswith(number+' - ')
-    lines=draft['Cold Email'].split('\n')
-    # Hi name / blank / well-wishing line / blank / paragraph / blank / paragraph / blank / sign-off / name / number
-    assert lines[:4]==['Hi Sam,','',"I hope you're doing well.",'']
-    assert lines[5]=='' and lines[7]=='' and lines[-3:]==[signoff+',','Candidate','8897404807']
-    assert phrase in draft['Cold Email']
-    # Only skills the JD names that the resume also has; Cypress is not claimed.
-    assert 'Playwright' in lines[4] and 'Cypress' not in draft['Cold Email']
-    assert lines[6].startswith('For example, I built Selenium and API tests.')
+    paragraphs=draft['Cold Email'].split('\n\n')
+    # Hi name / well-wishing line / why / experience and tools / ask / sign-off, name, number
+    assert paragraphs[0]=='Hi Sam,' and paragraphs[1]=="I hope you're doing well."
+    assert paragraphs[-1].split('\n')==[signoff+',','Candidate','8897404807']
+    assert phrase in draft['Cold Email'] and 'For example' not in draft['Cold Email']
+    # Tools the JD names that the resume also has come first; Cypress is never claimed.
+    assert "I'm a QA Engineer with 5 years of experience" in paragraphs[3]
+    tools = paragraphs[3].split('automation experience includes ')[1].rstrip('.').replace(' and ', ' ').split(', ')
+    assert set(t.strip() for t in tools[:3]) == {'Playwright', 'Python', 'Postman'}
+    assert 'Cypress' not in draft['Cold Email']
+    assert paragraphs[-2].endswith("I've attached my resume for reference.")
     assert draft['Cold Email Subject'].count('QA Engineer')<=1
     facts['resume_attached']=False
     assert 'attached' not in grounded_draft(row,metadata,facts)['Cold Email']

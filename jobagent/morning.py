@@ -554,9 +554,12 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     founder_cfg = cfg.get('founder_emails', {})
     startup_cfg = {'enabled': True, 'max_companies': 30, 'min_employees': founder_cfg.get('min_employees', 10),
                    'max_employees': founder_cfg.get('max_employees', 200), **cfg.get('startups', {})}
+    unsent = {str(e.get('domain') or '') for e in read_json(ROOT / 'gmail_report_drafts.json', {}).values()
+              if isinstance(e, dict) and e.get('state') in ('drafted', 'pending') and e.get('domain')}
     try:
         startups, startup_checks = startup_pipeline.discover(startup_cfg, profile, run_dir, all_rows, coverage,
-                                                             remaining=lambda: remaining(deadline), progress=progress)
+                                                             remaining=lambda: remaining(deadline), progress=progress,
+                                                             keep_domains=unsent)
     except TimeoutError:
         raise
     except Exception as exc:

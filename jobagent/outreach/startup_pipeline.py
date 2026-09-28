@@ -22,8 +22,11 @@ STARTUP_FIELDS = (
 )
 
 
-def discover(cfg, profile, run_dir, rows, coverage, *, remaining=lambda: None, progress=print):
-    """Add directory identity to actual jobs and retain checked no-opening leads."""
+def discover(cfg, profile, run_dir, rows, coverage, *, remaining=lambda: None, progress=print, keep_domains=()):
+    """Add directory identity to actual jobs and retain checked no-opening leads.
+
+    `keep_domains` are startups with an unsent draft: they are checked again
+    every day (free), so the draft stays current until it is sent."""
     from jobagent.morning import read_json
     from jobagent.sources import yc_directory
     from jobagent.startup_research import check_openings
@@ -45,8 +48,11 @@ def discover(cfg, profile, run_dir, rows, coverage, *, remaining=lambda: None, p
         # New domains first, then least recently checked. Stable fit ordering
         # remains the tie-breaker and a run never researches an unbounded list.
         ranked.sort(key=lambda c: history.get(c['domain'], ''))
+        keep = set(keep_domains)
+        todays = [c for c in ranked if c['domain'] in keep]
+        todays += [c for c in ranked if c['domain'] not in keep][:max(0, int(cfg.get('max_companies', 5)))]
         checks = []
-        for company in ranked[:max(0, int(cfg.get('max_companies', 5)))]:
+        for company in todays:
             remaining()
             progress(f"Checking startup openings: {company['name']} ({company['domain']}).")
             result = check_openings(company, profile, existing_rows=rows, existing_coverage=coverage)
