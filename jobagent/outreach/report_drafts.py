@@ -60,6 +60,13 @@ def decode_draft(draft):
 
 def draft_recipient(row):
     """Prefill an exact, sourced public address for review in an unsent draft."""
+    from jobagent.startup_output import opening_flag, outreach_domain
+    if opening_flag(row) is not None:
+        from jobagent.outreach.founders import verified_leadership_contact
+        from jobagent.outreach.service import recent
+        if (not verified_leadership_contact(row, outreach_domain(row))
+                or not recent(row.get('Email Ownership Checked At'), max_age_days=30)):
+            return ''
     address = row.get('Public Work Email', '') or ''
     try:
         source = urlsplit(row.get('Email Source', '') or '')
@@ -86,6 +93,31 @@ def extract_signature(body):
 SEND_ELIGIBLE_STATUSES = {'Created and read back', 'Updated and read back', 'Existing draft reused'}
 
 
+def matching_ledger_key(row, ledger):
+    """Preserve company-level suppression, also across renamed firms/inboxes."""
+    from jobagent.startup_output import outreach_domain
+    company = re.sub(r'[^a-z0-9]', '', row.get('Company', '').casefold())
+    legacy = hashlib.sha256(company.encode()).hexdigest()[:24]
+    domain = outreach_domain(row)
+    email = (row.get('Public Work Email') or '').strip().casefold()
+    for key, entry in ledger.items():
+        prior_company = re.sub(r'[^a-z0-9]', '', str(entry.get('company', '')).casefold())
+        prior_email = (entry.get('sent_to') or entry.get('email') or '').strip().casefold()
+        prior_domain = str(entry.get('domain') or '').casefold().removeprefix('www.')
+        if (key == legacy or company and company == prior_company
+                or email and email == prior_email or domain and domain == prior_domain):
+            return key
+    return None
+
+
+def _followup_status(entry):
+    if entry.get('followup_sent_at'):
+        return 'Sent ' + entry['followup_sent_at']
+    if entry.get('followup_skipped_reason'):
+        return 'Skipped: ' + entry['followup_skipped_reason']
+    return 'Not scheduled'
+
+
 def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None, deadline=None, recreate_missing=False, resume_path=None, auto_send=False):
     if not expected_sender:
         raise ValueError('Expected Gmail account is required')
@@ -103,8 +135,13 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
             raise ValueError('Wrong Gmail account')
     out, ledger_path = Path(out), Path(ledger_path)
     rows = list(csv.DictReader((out/'Startup Outreach.csv').open(encoding='utf-8-sig')))
+    from jobagent.startup_output import duplicate_key, opening_flag, outreach_domain, tracker_row, write_outreach
     with process_lock(ledger_path.with_suffix('.lock')):
         ledger = json.loads(ledger_path.read_text(encoding='utf-8')) if ledger_path.exists() else {}
+        historical_path = ledger_path.parent / 'outreach_draft_ledger.json'
+        historical = json.loads(historical_path.read_text(encoding='utf-8')) if historical_path.exists() else {}
+        if any(not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()) for data in (ledger, historical)):
+            raise ValueError('Invalid outreach ledger; refusing to risk duplicate drafts')
         results = []
         api = service.users().drafts()
         # Recover through saved Gmail IDs and reserved content hashes, without
@@ -116,7 +153,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
             token = page.get('nextPageToken')
             if not token:
                 break
-        owned, subjects = {}, set()
+        owned, subjects, recipients = {}, set(), set()
         # Gmail's editor can discard custom headers while retaining the draft ID.
         # The saved ID recovers identity; the content hash still protects user edits.
         keys_by_id = {entry['draft_id']: key for key, entry in ledger.items() if entry.get('draft_id')}
@@ -126,15 +163,19 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
             draft = api.get(userId='me',id=item['id'],format='raw').execute()
             decoded = decode_draft(draft)
             subjects.add(decoded['subject'])
+            if decoded['to']:
+                from email.utils import getaddresses
+                recipients.update(address.casefold() for _, address in getaddresses([decoded['to']]))
             key = decoded['key'] or keys_by_id.get(draft['id']) or pending_hashes.get(
                 content_hash(decoded['subject'], decoded['body'], decoded['to'], decoded['attachments']))
             if key:
                 owned[key] = (draft,decoded)
+        processed = set()
         for row in rows:
             if not row.get('Cold Email') or row.get('Draft Status','').startswith('Withheld'):
                 continue
             company = re.sub(r'[^a-z0-9]','',row['Company'].casefold())
-            key = hashlib.sha256(company.encode()).hexdigest()[:24]
+            key = matching_ledger_key(row, ledger) or hashlib.sha256(company.encode()).hexdigest()[:24]
             subject, body = row['Cold Email Subject'], row['Cold Email']
             if any(c in subject for c in '\r\n'):
                 raise ValueError('Invalid draft subject')
@@ -143,16 +184,24 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
             # The resume tailored to this job description when one was built,
             # otherwise the configured resume.
             row_data, row_meta = resume_data, resume_meta
-            if row.get('Resume File') and (out / row['Resume File']).is_file():
-                row_data, row_meta = load_resume(out / row['Resume File'])
+            if row.get('Resume File'):
+                tailored_path = (out / row['Resume File']).resolve()
+                if not tailored_path.is_relative_to(out.resolve()):
+                    raise ValueError('Tailored resume must stay inside the report directory')
+                if not tailored_path.is_file():
+                    row_data, row_meta = None, None
+                else:
+                    row_data, row_meta = load_resume(tailored_path)
             desired_hash = content_hash(subject,body,to,[row_meta] if row_meta else [])
             entry = ledger.get(key,{})
-            result = {'Company':row['Company'],'Job Link':row['Job Link'],'Status':'',
+            result = {'Company':row['Company'],'Job Link':row.get('Job Link',''),'Status':'',
                       'Gmail Draft URL':'','Recipient':to or 'Public email not available; To left blank',
                       'Email Ownership Status':row.get('Email Ownership Status') or 'unconfirmed',
                       'Email Source':row.get('Email Source',''),
                       'Email Contact':row.get('Email Contact Name') or row.get('Manager Name',''),
-                      'Resume Attachment':'',
+                      'Resume Attachment':'', 'Duplicate Key':duplicate_key(row),
+                      'Date Created':entry.get('reserved_at') or row.get('Date Created') or now_iso(),
+                      'Sent At':entry.get('sent_at',''), 'Follow-up Status':_followup_status(entry),
                       'Recipient Review':'Review public source and current ownership before sending' if to else 'Find a public work email before sending',
                       'Approval':'Pending user approval; unsent'}
             if entry.get('state') == 'sent':
@@ -161,11 +210,25 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                               **{'Sent At':entry.get('sent_at',''), 'Sent Message URL':entry.get('sent_message_url','')})
                 results.append(result)
                 continue
+            if (key in processed or entry.get('state') in ('sending', 'send_uncertain')
+                    or entry.get('job_url') and entry['job_url'] != row.get('Job Link')):
+                result['Status'] = 'Existing company/contact outreach preserved; no duplicate created'
+                results.append(result)
+                continue
+            if matching_ledger_key(row, historical) is not None:
+                result['Status'] = 'Historical outreach already reserved or drafted; no duplicate created'
+                results.append(result)
+                continue
             # Only outreach with a sourced address becomes a Gmail draft; the
             # rest stays in the Excel report (user choice 2026-09-28: no
             # blank-To drafts).
             if not to:
                 result.update(Status='Pending contact research; saved in Excel only', Recipient='')
+                results.append(result)
+                continue
+            processed.add(key)
+            if row.get('Resume File') and row_meta is None:
+                result['Status'] = 'Withheld: selected tailored resume is missing'
                 results.append(result)
                 continue
             if not row_meta and re.search(r'\b(?:attached\s+(?:my\s+)?resume|resume\s+is\s+attached)\b', body, re.I):
@@ -189,7 +252,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                     result['Status'] = 'Update needed'
             elif entry and not recreate_missing:
                 result['Status'] = 'Previously reserved draft absent; not recreated (may have been sent/deleted)'
-            elif subject in subjects:
+            elif subject in subjects or to.casefold() in recipients:
                 result['Status'] = 'Similar existing draft preserved; no duplicate created'
             else:
                 result['Status'] = 'Create needed'
@@ -210,7 +273,17 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 if entry.get('draft_id') and not updating:
                     entry.setdefault('replaced_draft_ids', []).append(entry['draft_id'])
                     entry['recreation_reason'] = 'User explicitly requested rebuilding deleted drafts'
-                entry.update(state='pending',company=row['Company'],reserved_at=now_iso(),pending_content_hash=desired_hash)
+                entry.update(state='pending', company=row['Company'], email=to, domain=outreach_domain(row),
+                             reserved_at=entry.get('reserved_at') or now_iso(), pending_content_hash=desired_hash,
+                             job_url=row.get('Job Link',''), role=row.get('Job Title',''),
+                             has_relevant_opening=opening_flag(row), duplicate_key=duplicate_key(row),
+                             contact_name=row.get('Email Contact Name') or row.get('Manager Name',''),
+                             contact_title=row.get('Email Contact Role') or row.get('Manager Role',''),
+                             email_source=row.get('Email Source',''), email_provider=row.get('Email Provider',''),
+                             verification_status=row.get('Email Verification Status') or row.get('Email Ownership Status',''),
+                             startup_source=row.get('Startup Source',''), team_size=row.get('Team Size') or row.get('Employee Count',''),
+                             region=row.get('Region') or row.get('Location',''), resume_filename=row_meta['filename'] if row_meta else '',
+                             subject=subject)
                 ledger[key] = entry
                 atomic_json(ledger_path,ledger)
                 try:
@@ -219,6 +292,9 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                     if content_hash(decoded['subject'],decoded['body'],decoded['to'],decoded['attachments']) != desired_hash:
                         raise ValueError('Draft read-back differs')
                     actual_attachments = decoded['attachments']
+                    owned[key] = (saved, decoded)
+                    subjects.add(subject)
+                    recipients.add(to.casefold())
                     entry.update(state='drafted',draft_id=saved['id'],content_hash=desired_hash,verified_at=now_iso())
                     result['Status'] = 'Updated and read back' if updating else 'Created and read back'
                 except Exception as exc:
@@ -227,6 +303,8 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
             if (auto_send and result['Status'] in SEND_ELIGIBLE_STATUSES
                     and entry.get('draft_id') and entry.get('state') == 'drafted' and to):
                 try:
+                    entry.update(state='sending', send_attempted_at=now_iso())
+                    atomic_json(ledger_path, ledger)
                     sent = api.send(userId='me', body={'id': entry['draft_id']}).execute()
                     headers = service.users().messages().get(
                         userId='me', id=sent['id'], format='metadata', metadataHeaders=['Message-ID']
@@ -239,16 +317,19 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                     result.update(Status='Sent automatically (auto-send enabled)',
                                   Approval='Sent automatically; no manual review step')
                 except Exception as exc:
-                    entry.update(state='uncertain', error=type(exc).__name__)
-                    result['Status'] = 'Auto-send failed; left as draft for manual review'
+                    entry.update(state='send_uncertain', error=type(exc).__name__)
+                    result['Status'] = 'Auto-send outcome uncertain; manual review required before retry'
             if entry.get('state') == 'sent':
                 result['Gmail Draft URL'] = entry.get('sent_message_url', '')
             elif current or entry.get('draft_id'):
                 result['Gmail Draft URL'] = 'https://mail.google.com/mail/u/0/#drafts'
             result['Resume Attachment'] = '; '.join(a['filename'] for a in actual_attachments)
+            result['Sent At'] = entry.get('sent_at','')
             ledger[key] = entry
             atomic_json(ledger_path,ledger)
             results.append(result)
         outreach_sent = sum(1 for r in results if r['Status'] == 'Sent automatically (auto-send enabled)')
         atomic_json(out/'Gmail Draft Status.json',{'checked_at':now_iso(),'sender':sender,'outreach_sent':outreach_sent,'drafts':results})
+        states = {r.get('Job Link'):r for r in results}
+        write_outreach(out, [tracker_row(row, states.get(row.get('Job Link'))) for row in rows])
         return results

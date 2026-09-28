@@ -316,6 +316,70 @@ def recipient_template(row, metadata, facts, company, evidence=''):
     return subject, body, template
 
 
+# Skill areas a proactive email can mention: (words in the startup's own
+# description that make the area relevant, resume terms that must all be
+# present, how the email says it). Only the most relevant two or three are used.
+PROACTIVE_AREAS = [
+    (r'\b(?:ai|llm|agents?|agentic|generative|gpt|model|ml|copilot|rag)\b', ('llm evaluation', 'agent'),
+     'LLM and AI agent evaluation'),
+    (r'\b(?:voice|chat|chatbot|conversational|whatsapp|speech|call)\b', ('voice bot', 'speech'),
+     'chatbot and voice bot testing'),
+    (r'\b(?:api|apis|platform|developer|integration|payments?|fintech|infrastructure|b2b|saas)\b', ('postman', 'rest assured'),
+     'API testing with Postman and Rest Assured'),
+    (r'\b(?:data|analytics|payments?|fintech|financial|banking|ledger)\b', ('sql',), 'SQL data validation'),
+    (r'\b(?:scale|real-time|realtime|latency|infrastructure|high-traffic)\b', ('jmeter',), 'JMeter performance testing'),
+    (r'\b(?:vision|camera|image|video|ocr)\b', ('computer vision',), 'computer vision testing'),
+]
+AUTOMATION_AREA = (('selenium', 'playwright', 'testng'), 'Selenium, Playwright and TestNG automation')
+
+
+def proactive_areas(company_text, facts, limit=3):
+    resume = ' '.join([facts.get('summary', ''), *facts.get('bullets', []),
+                       *[f'{a} {b}' for a, b in (facts.get('resume') or {}).get('SKILLS', [])]]).lower()
+    text = (company_text or '').lower()
+    areas = [phrase for pattern, needs, phrase in PROACTIVE_AREAS
+             if re.search(pattern, text) and all(n in resume for n in needs)]
+    needs, phrase = AUTOMATION_AREA
+    if len(areas) < limit and all(n in resume for n in needs):
+        areas.append(phrase)
+    return areas[:limit]
+
+
+def proactive_draft(company, contact, facts):
+    """A short cold email to a startup's founder/CTO/CEO when it has no
+    current QA opening: who I am, the few skills that fit its product, and
+    whether a QA/SDET need exists now or soon. Company facts come only from
+    its own directory listing (`one_liner`, tags)."""
+    name = company['name']
+    first = (contact.get('Email Contact Name') or '').split()[0] if contact.get('Email Contact Name') else f'{name} team'
+    role = contact.get('Email Contact Role', '')
+    text = ' '.join([company.get('one_liner', ''), company.get('description', ''), *company.get('tags', []),
+                     *company.get('industries', [])])
+    areas = proactive_areas(text, facts)
+    skills = areas[0] if len(areas) == 1 else ', '.join(areas[:-1]) + ' and ' + areas[-1] if areas else ''
+    years = re.search(r'\bwith\s+(\d+(?:\.\d+)?)\s+years?\s+of\s+experience', facts.get('summary', ''), re.I)
+    me = f'a QA engineer with {years[1]} years of experience' if years else 'a QA engineer'
+    words = set(re.findall(r'[a-z][a-z0-9+]{2,}', text.lower()))
+    bullet = max(facts.get('bullets') or [''], key=lambda b: (len(set(re.findall(r'[a-z][a-z0-9+]{2,}', b.lower())) & words), -len(b)))
+    about = f' ({company["one_liner"].strip().rstrip(".")})' if company.get('one_liner') else ''
+    signoff = 'Regards' if re.search(r'\bcto\b|chief technology|engineering', role, re.I) else 'Best regards'
+    p1 = (f'I came across {name}{about} and wanted to reach out directly. I\'m {me}'
+          + (f', most recently in {skills},' if skills else ',') + ' and I\'m exploring Senior QA and SDET opportunities.')
+    ask = ('Do you currently have, or expect to have, a need for QA or SDET support on your team? '
+           + ("I've attached my resume in case it's useful." if facts.get('resume_attached') else "I'd be happy to share my resume."))
+    p2 = f'{evidence_sentence(bullet)} {ask}'.strip()
+    body = f"Hi {first},\n\nI hope you're doing well.\n\n{p1}\n\n{p2}\n\n{signoff},\n{facts['name']}"
+    if facts.get('phone'):
+        body += '\n' + str(facts['phone']).strip()
+    return {'Cold Email Subject': f'QA / SDET experience for {name}', 'Cold Email': body,
+            'Email Template': '9 - Proactive, no current QA opening',
+            'LinkedIn Note': (f'Hi {first}, I came across {name} and I\'m a QA engineer exploring QA/SDET roles. '
+                              'Open to connecting?')[:300],
+            'Approval Status': 'Pending user approval; do not send',
+            'Draft Generation': 'Proactive outreach from the startup\'s directory listing and exact resume evidence; unsent',
+            'Why This Role': 'No current QA opening found; proactive outreach', 'Requirements To Confirm': ''}
+
+
 def grounded_draft(row, metadata, facts):
     """Compose from actual resume bullets; no model-generated career claims."""
     tokens = set(re.findall(r'[a-z][a-z0-9+]{2,}', row['JD Text'].lower()))

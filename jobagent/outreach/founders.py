@@ -16,17 +16,62 @@ send, on the company's own domain. Nothing is guessed and sent unverified.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from jobagent.runtime import now_iso
 
-LEADER = re.compile(r"\b(?:co-?\s?founder|founder|ceo|chief executive|cto|chief technology)\b", re.I)
+LEADER = re.compile(r"\b(?:co[-\s]?founder|founder|ceo|chief executive|cto|chief technolog(?:y|ical))\b", re.I)
 EXACT = re.compile(r"Employees:\s*([\d,]+)|employs\s+([\d,]+)\s+people", re.I)
 BAND = re.compile(r"Company Size:\s*([\d,]+)\s*[-–]\s*([\d,]+)\s+employees", re.I)
 NOT_COMPANY_SITES = ("linkedin.", "ycombinator.", "workatastartup.", "crunchbase.", "ashbyhq.", "lever.co",
                      "greenhouse.io", "github.", "twitter.", "x.com", "medium.", "wikipedia.", "youtube.",
                      "facebook.", "instagram.", "glassdoor.", "indeed.", "wellfound.", "pitchbook.",
                      "tracxn.", "producthunt.", "techcrunch.", "prnewswire.", "businesswire.", "prweb.")
+PERSONAL_DOMAINS = frozenset(("gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.in", "ymail.com",
+                            "hotmail.com", "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com",
+                            "me.com", "mac.com", "proton.me", "protonmail.com", "pm.me", "mail.com",
+                            "gmx.com", "gmx.net", "rediffmail.com", "zoho.com"))
+
+
+def professional_domain(value):
+    """Normalize an explicit company domain/website, excluding public platforms.
+
+    This does not infer a website from a company name. Use company_domain for
+    untrusted search results and this helper for source-provided websites.
+    """
+    value = str(value or "").strip()
+    if not value or re.search(r"\s|@", value):
+        return ""
+    try:
+        parsed = urlsplit(value if "://" in value else "https://" + value)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+    if parsed.scheme not in ("https", "http") or parsed.username or parsed.password:
+        return ""
+    host = host.removeprefix("www.")
+    if not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", host):
+        return ""
+    if host in PERSONAL_DOMAINS or any(host.endswith("." + domain) for domain in PERSONAL_DOMAINS):
+        return ""
+    if any(site in host for site in NOT_COMPANY_SITES):
+        return ""
+    return host
+
+
+def professional_email(email, domain):
+    """Only a named work mailbox on the exact known company domain."""
+    domain = professional_domain(domain)
+    if not domain or not isinstance(email, str):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", email):
+        return False
+    local, host = email.rsplit("@", 1)
+    if local.casefold() in {"privacy", "security", "support", "noreply", "no-reply", "marketing", "sales",
+                           "info", "hello", "contact", "careers", "jobs", "recruiting", "hr"}:
+        return False
+    return host.casefold() == domain
 
 
 def key(name):
@@ -96,36 +141,47 @@ def profile_leaders(company, search):
         lines = [line.strip() for line in result.get("snippet", "").splitlines() if line.strip()]
         name = lines[0][2:].strip() if lines and lines[0].startswith("# ") else result.get("title", "").split(" - ")[0]
         headline = lines[1] if len(lines) > 1 else ""
-        if name and LEADER.search(headline) and wanted and wanted in key(headline):
+        if name and rank(headline) < 4 and wanted and wanted in key(headline):
             found.append({"name": name, "title": headline[:160], "url": url, "source": url})
     return found
 
 
-def rank(title):
+ENGINEERING_HEAD = re.compile(r"\b(?:vp|vice president|head)\b[^|,]{0,25}\bengineering\b", re.I)
+SMALL_TEAM = 50
+
+
+def rank(title, team_size=None):
+    """Who to contact first. Up to 50 people: Founder/Co-founder, CTO, CEO.
+    Larger (or unknown): CTO, technical co-founder, Founder/CEO. VP or Head of
+    Engineering only when none of those is available."""
     title = title or ""
-    if re.search(r"\bcto\b|chief technology", title, re.I):
-        return 0
-    if re.search(r"founder", title, re.I):
-        return 1
-    if re.search(r"\bceo\b|chief executive", title, re.I):
-        return 2
-    return 3
+    cto = bool(re.search(r"\bcto\b|chief technolog(?:y|ical)", title, re.I))
+    founder = bool(re.search(r"\bfounder\b|\bco[-\s]?founder\b", title, re.I))
+    ceo = bool(re.search(r"\bceo\b|chief executive", title, re.I))
+    if team_size is not None and team_size <= SMALL_TEAM:
+        order = [founder, cto, ceo]
+    else:
+        order = [cto, founder and bool(re.search(r"technical|cto|engineering", title, re.I)), founder or ceo]
+    for n, hit in enumerate(order):
+        if hit:
+            return n
+    return 3 if ENGINEERING_HEAD.search(title) else 4
 
 
-def leaders(row, meta, search=None):
-    """Up to three leaders, CTO first, then founders, then CEO."""
+def leaders(row, meta, search=None, team_size=None):
+    """Up to three leaders, in the contact order for the company's size."""
     people = []
     try:
         import json
         contacts = json.loads(row.get("Hiring Contacts") or "[]")
     except ValueError:
         contacts = []
-    for c in contacts:
-        # A YC posting's hiring contact is usually a founder even when untitled.
-        if c.get("name") and (not c.get("title") or LEADER.search(c["title"])):
-            people.append({"name": c["name"], "title": c.get("title") or "Hiring contact on YC posting",
+    for c in contacts if isinstance(contacts, list) else []:
+        # A posting's hiring contact may be a recruiter. Require a named role.
+        if isinstance(c, dict) and c.get("name") and rank(c.get("title")) < 4:
+            people.append({"name": c["name"], "title": c["title"],
                            "url": c.get("url") or row.get("Job Link", ""), "source": row.get("Job Link", "")})
-    if meta.get("Manager Name") and LEADER.search(meta.get("Manager Role", "")):
+    if meta.get("Manager Name") and rank(meta.get("Manager Role", "")) < 4:
         people.append({"name": meta["Manager Name"], "title": meta["Manager Role"],
                        "url": meta.get("Manager LinkedIn") or meta.get("Manager Source", ""),
                        "source": meta.get("Manager Source", "")})
@@ -136,16 +192,18 @@ def leaders(row, meta, search=None):
             pass
     unique = {}
     for p in people:
-        unique.setdefault(key(p["name"]), p)
-    return sorted(unique.values(), key=lambda p: rank(p["title"]))[:3]
+        name_key = key(p["name"])
+        if name_key not in unique or rank(p["title"], team_size) < rank(unique[name_key]["title"], team_size):
+            unique[name_key] = p
+    return sorted(unique.values(), key=lambda p: rank(p["title"], team_size))[:3]
 
 
 def company_domain(company, urls):
     """The company's own web domain, from URLs whose host carries its name."""
     brand = key(plain_name(company))
     for url in urls:
-        host = (urlsplit(url).hostname or "").lower()
-        if not host or any(site in host for site in NOT_COMPANY_SITES):
+        host = professional_domain(url)
+        if not host:
             continue
         labels = host.split(".")
         root = ".".join(labels[-3:] if len(labels) >= 3 and labels[-2] in ("co", "com", "org", "net", "ac") else labels[-2:])
@@ -159,33 +217,43 @@ def split_name(name):
     return (parts[0], parts[-1]) if len(parts) >= 2 else None
 
 
-def contact_from_executives(company, executives, *, domain_given):
-    """The best verified founder/CTO/CEO from a Hunter Domain Search.
-    Searched by name only, Hunter's organisation must match the company."""
+def contact_from_executives(company, executives, *, domain_given, team_size=None, expected_domain="", provider="Hunter"):
+    """The best verified founder/CTO/CEO (VP or Head of Engineering only when
+    none of them is listed) from a Hunter Domain Search or Apollo, in the
+    contact order for the company's size. Searched by name only, the listed
+    organisation must match the company."""
     wanted = key(plain_name(company))
     best = None
     for person in executives:
-        domain = person.get("domain", "")
+        domain = professional_domain(person.get("domain", ""))
+        if expected_domain and domain != professional_domain(expected_domain):
+            continue
         organization = key(person.get("organization", ""))
         if not domain_given and not (len(wanted) >= 3 and organization
                                      and (organization.startswith(wanted) or wanted.startswith(organization))):
             continue
-        if not (person.get("verified") and person.get("name") and LEADER.search(person.get("title", ""))
-                and person.get("email", "").lower().endswith("@" + domain)):
+        title = person.get("title", "")
+        if not (person.get("verified") and person.get("name") and rank(title, team_size) < 4
+                and professional_email(person.get("email", ""), domain)):
             continue
-        if best is None or rank(person["title"]) < rank(best["title"]):
+        if best is None or rank(title, team_size) < rank(best["title"], team_size):
             best = person
     if not best:
         return {}
-    linkedin = best["linkedin"] if best["linkedin"].startswith("http") else ""
-    source = best["source"] or linkedin or f"https://{best['domain']}"
+    linkedin = best.get("linkedin") or ""
+    linkedin = linkedin if linkedin.startswith("http") else ""
+    source = best.get("source") or linkedin or f"https://{best['domain']}"
+    if not source.startswith(("http://", "https://")):
+        source = f"https://{best['domain']}"
+    provider = best.get("provider") or provider
     return {
         "Public Work Email": best["email"], "Email Source": source,
         "Email Contact Name": best["name"], "Email Contact Role": best["title"],
         "Email Contact LinkedIn": linkedin if "linkedin.com/in/" in linkedin else "",
-        "Email Evidence": (f"Hunter Domain Search: verified deliverable ({best['organization'] or best['domain']}, "
+        "Email Provider": provider, "Email Verification Status": "verified", "Company Domain": professional_domain(best['domain']),
+        "Email Evidence": (f"{provider}: verified deliverable ({best.get('organization') or best['domain']}, "
                            f"confidence {best.get('confidence', 'n/a')}); first public source {source}"),
-        "Email Ownership Status": "Verified deliverable mailbox; listed by Hunter from public sources",
+        "Email Ownership Status": f"Verified deliverable mailbox; listed by {provider}",
         "Email Ownership Checked At": now_iso(),
     }
 
@@ -195,7 +263,7 @@ def verified_contact(people, domain, finder):
     wanted = []
     for p in people:
         parts = split_name(p["name"])
-        if parts:
+        if parts and rank(p.get("title")) < 4:
             wanted.append((p, {"firstName": parts[0], "surname": parts[1], "domain": domain}))
     if not wanted or not domain:
         return {}
@@ -205,7 +273,11 @@ def verified_contact(people, domain, finder):
         found = finder([query])
         item = found.get((query["firstName"].casefold(), query["surname"].casefold()))
         email = (item or {}).get("email", "")
-        if not email or not email.lower().endswith("@" + domain.lower()):
+        status = str((item or {}).get("validationStatus") or "").casefold()
+        safe = (status in ("valid", "verified", "hunter verified: valid") or
+                ((item or {}).get("isDeliverable") is True and (item or {}).get("isSafeToSend") is True
+                 and not any((item or {}).get(flag) for flag in ("isCatchAll", "isRoleAccount", "isDisposable"))))
+        if not safe or not professional_email(email, domain):
             continue
         source = person["source"] if (person.get("source") or "").startswith("http") else person.get("url", "")
         if not source.startswith("http"):
@@ -214,6 +286,8 @@ def verified_contact(people, domain, finder):
             "Public Work Email": email, "Email Source": source,
             "Email Contact Name": person["name"], "Email Contact Role": person["title"],
             "Email Contact LinkedIn": person["url"] if "linkedin.com/in/" in person.get("url", "") else "",
+            "Email Provider": "Hunter" if status.startswith("hunter") else "Email verification service",
+            "Email Verification Status": "verified", "Company Domain": professional_domain(domain),
             "Email Evidence": (f"Mailbox verified deliverable and safe to send by an email verification service "
                                f"({item.get('validationStatus') or 'valid'}, score {item.get('overallScore', 'n/a')}); "
                                f"name and role from {source}"),
@@ -221,3 +295,34 @@ def verified_contact(people, domain, finder):
             "Email Ownership Checked At": now_iso(),
         }
     return {}
+
+
+def verified_leadership_contact(meta, domain=""):
+    """Whether cached evidence supports a verified company leadership address.
+
+    The caller controls maximum evidence age; missing, invalid and future
+    timestamps are rejected here. Publicly sourced alone is not verified.
+    """
+    domain = domain or meta.get("Company Domain") or meta.get("Domain") or ""
+    email = meta.get("Public Work Email") or ""
+    # Older adapter records predate Company Domain but have an explicit
+    # verification status and were checked against the company on creation.
+    if not domain and "@" in email:
+        domain = email.rsplit("@", 1)[1]
+    if not professional_email(email, domain) or not meta.get("Email Contact Name"):
+        return False
+    if rank(meta.get("Email Contact Role")) >= 4:
+        return False
+    status = str(meta.get("Email Verification Status") or "").casefold()
+    ownership = str(meta.get("Email Ownership Status") or "").casefold()
+    if status not in ("verified", "valid") and not ownership.startswith("verified deliverable mailbox"):
+        return False
+    try:
+        source = urlsplit(meta.get("Email Source") or "")
+        checked = datetime.fromisoformat(meta.get("Email Ownership Checked At") or "")
+        checked = checked.replace(tzinfo=timezone.utc) if checked.tzinfo is None else checked
+        if checked > datetime.now(timezone.utc):
+            return False
+    except (ValueError, TypeError):
+        return False
+    return bool(source.scheme in ("https", "http") and source.hostname and meta.get("Email Evidence"))

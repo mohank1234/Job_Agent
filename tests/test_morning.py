@@ -338,6 +338,64 @@ def test_daily_work_finds_verified_cto_email_for_small_startup(tmp_path, monkeyp
     assert rows[0]['Public Work Email'] == '' and rows[0]['Manager Name'] == 'Cai Tech'
 
 
+def test_startup_without_opening_gets_one_proactive_draft_to_its_verified_cto(tmp_path, monkeypatch):
+    import csv as csvmod
+    from jobagent import llm
+    from jobagent.enrich import exa, hunter
+    from jobagent import startup_research
+    from jobagent.sources import yc_directory
+    project = tmp_path/'project'
+    (project/'resume').mkdir(parents=True)
+    (project/'companies.yaml').write_text('ashby: []\n', encoding='utf-8')
+    (project/'resume'/'resume_data.py').write_text(
+        "NAME='CANDIDATE'\nTAGLINE='QA Engineer'\nCONTACT=['City']\nEDUCATION=[('BE','Uni')]\n"
+        "SUMMARY='QA Engineer with 5 years of experience.'\n"
+        "SKILLS=[('AI, LLM and Agent Testing','LLM evaluation, AI agent evaluation'),('API Testing','Postman, Rest Assured'),"
+        "('Test Automation','Selenium WebDriver, Playwright, TestNG')]\n"
+        "EXPERIENCE=[{'title':'QA','company':'Co','dates':'2020 - Present','bullets':['Built LLM agent evaluation suites.']}]\n",
+        encoding='utf-8')
+    directory = [{'name': 'Beta', 'slug': 'beta', 'website': 'https://beta.io', 'team_size': 40, 'isHiring': True,
+                  'status': 'Active', 'one_liner': 'AI agents for support teams', 'tags': ['AI', 'B2B'],
+                  'regions': ['India', 'Remote'], 'url': 'https://www.ycombinator.com/companies/beta', 'batch': 'W24'}]
+    lookups = []
+    def executives(company, domain, *a, **k):
+        lookups.append(domain)
+        return [{'name': 'Cai Tech', 'title': 'Co-founder & CTO', 'email': 'cai@beta.io', 'verified': True,
+                 'linkedin': '', 'source': 'https://beta.io/team', 'domain': 'beta.io', 'organization': 'Beta'}]
+    monkeypatch.setattr(morning, 'ROOT', project)
+    monkeypatch.setattr(morning, 'collect_boards', lambda *a, **k: [])
+    monkeypatch.setattr(llm, 'make_provider', lambda cfg: None)
+    monkeypatch.setattr(exa, 'exa_search', lambda *a, **k: [])
+    monkeypatch.setattr(yc_directory, 'fetch_hiring', lambda *a, **k: directory)
+    monkeypatch.setattr(startup_research, 'check_openings', lambda company, *a, **k: {
+        'company': company, 'checked_at': __import__('jobagent.runtime', fromlist=['now_iso']).now_iso(),
+        'rows': [], 'coverage': [], 'sources': [company['website'] + '/careers'], 'has_relevant_opening': False,
+        'complete': True, 'status': 'No public ATS careers board found on its website'})
+    monkeypatch.setattr(hunter, 'api_key', lambda: 'test')
+    monkeypatch.setattr(hunter, 'executives', executives)
+    profile = load_profile(Path(__file__).resolve().parents[1]/'profile.yaml.example')
+    profile.raw['identity']['experience']['years'] = 5
+    out, state = project/'out', project/'state'
+    (state/'2026-09-28').mkdir(parents=True)
+    summary = morning.daily_work({'morning': {'signature_phone': '8897404807'}}, profile, out, state/'2026-09-28',
+                                 progress=lambda *a: None)
+    rows = list(csvmod.DictReader((out/'Startup Outreach.csv').open(encoding='utf-8-sig')))
+    assert len(rows) == 1 and rows[0]['Company'] == 'Beta'
+    row = rows[0]
+    assert row['Public Work Email'] == 'cai@beta.io' and row['Has Relevant Opening'] == 'False'
+    assert row['Draft Status'].startswith('Draft only; proactive enquiry')
+    assert row['Email Template'].startswith('9 - Proactive')
+    assert row['Cold Email'].startswith('Hi Cai,\n\nI hope you\'re doing well.')
+    assert 'AI agents for support teams' in row['Cold Email'] and row['Cold Email'].endswith('Candidate\n8897404807')
+    assert row['Resume File'].endswith('Candidate_Senior_QA_SDET_5Yrs.pdf') and (out/row['Resume File']).is_file()
+    assert summary['proactive_enquiries'] == 1 and summary['startups_checked'] == 1
+    assert lookups == ['beta.io']
+    # The same startup is not looked up or drafted as a new approach again the next day.
+    (state/'2026-09-29').mkdir()
+    morning.daily_work({'morning': {}}, profile, out, state/'2026-09-29', progress=lambda *a: None)
+    assert lookups == ['beta.io']
+
+
 def test_failed_research_is_retried_not_cached(tmp_path):
     from jobagent.outreach.daily_research import research_company
     class Busy:

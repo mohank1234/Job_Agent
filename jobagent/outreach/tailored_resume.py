@@ -195,13 +195,35 @@ def render_pdf(t, path):
     pdf.output(str(path))
 
 
+def file_name(data, title):
+    """A professional, role-specific name such as
+    Krishna_Mohan_B_Senior_QA_SDET_5Yrs.pdf; never "ATS" or "ATS Resume"."""
+    t = (title or "").lower()
+    senior = bool(re.search(r"\b(?:senior|sr\.?|lead|staff|principal)\b", t))
+    if re.search(r"\bai\b|llm|genai|generative|agentic|\bml\b", t):
+        role = "AI_QA_Engineer"
+    elif re.search(r"sdet|engineer in test|developer in test", t):
+        role = "QA_SDET"
+    elif re.search(r"automation", t):
+        role = "QA_Automation_Engineer"
+    elif re.search(r"\bqa\b|quality|test", t):
+        role = "QA_Engineer"
+    else:
+        role = "Resume"
+    if senior and role != "Resume":
+        role = "Senior_" + role
+    years = re.search(r"(\d+)\+?\s+years?", data.get("SUMMARY", ""))
+    parts = [data["NAME"].title(), role] + ([f"{years.group(1)}Yrs"] if years else [])
+    return re.sub(r"[^A-Za-z0-9]+", "_", "_".join(parts)).strip("_") + ".pdf"
+
+
 def build_for_row(data, row, out_dir):
-    """Write out_dir/resumes/<job>/<Name>_Resume.pdf for one posting and return
-    the report fields describing it."""
+    """Write out_dir/resumes/<job>/<role-specific name>.pdf for one posting and
+    return the report fields describing it."""
     t = tailor(data, row.get("JD Text", ""), row.get("Job Title", ""))
     slug = re.sub(r"[^a-z0-9]+", "-", f"{row.get('Company', '')}-{row.get('Job Title', '')}".lower()).strip("-")[:60]
     slug += "-" + hashlib.sha256(row.get("Job Link", "").encode()).hexdigest()[:8]
-    name = re.sub(r"[^A-Za-z0-9]+", "_", data["NAME"].title()).strip("_") + "_Resume.pdf"
+    name = file_name(data, row.get("Job Title", ""))
     path = Path(out_dir) / "resumes" / slug / name
     render_pdf(t, path)
     ats = t["ats"]

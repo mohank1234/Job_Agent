@@ -331,12 +331,14 @@ def whats_new(tabs, state_dir, today, summary):
     return counts, headline
 
 
-def prepare_report(out, rows, coverage, research, summary, *, state_dir=STATE):
+def prepare_report(out, rows, coverage, research, summary, *, state_dir=STATE, proactive=()):
     from jobagent.startup_output import enrich_rows, write_outreach
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     today = datetime.now(IST).date().isoformat()
-    shortlist = enrich_rows(rows, research)
+    # Proactive enquiries have no job posting, so they join the outreach
+    # shortlist but never the vacancy tabs.
+    shortlist = enrich_rows([*rows, *proactive], research)
     tabs = partition(rows, first_seen_path=Path(state_dir) / "first-seen.json", today=today)
     summary.update(checked=len(rows), counts={k: len(v) for k, v in tabs.items()}, startup_shortlist_count=len(shortlist))
     summary["whats_new"], summary["headline"] = whats_new(tabs, state_dir, today, summary)
@@ -351,7 +353,7 @@ def prepare_report(out, rows, coverage, research, summary, *, state_dir=STATE):
     atomic_json(out / "Daily Run.json", summary)
     draft_state = read_json(out / 'Gmail Draft Status.json', {}).get('drafts', [])
     states = {canonical(d['Job Link']): d for d in draft_state if d.get('Job Link')}
-    email_headers = ['Company', 'Job Title', 'To', 'Email Contact', 'Gmail Status', 'Gmail Drafts',
+    email_headers = ['Company', 'Job Title', 'Opening', 'To', 'Email Contact', 'Gmail Status', 'Gmail Drafts',
                      'Subject', 'Email Draft', 'ATS Match', 'ATS Missing Keywords', 'LinkedIn Note',
                      'Manager LinkedIn', 'Email Source', 'Recipient Evidence', 'Approval', 'Job Link',
                      'Resume Attachment']
@@ -360,7 +362,10 @@ def prepare_report(out, rows, coverage, research, summary, *, state_dir=STATE):
     for row in shortlist:
         state = states.get(canonical(row['Job Link']), {})
         recipient = draft_recipient(row)
-        email_rows.append([row.get('Company Display Name') or row['Company'], row['Job Title'], recipient,
+        opening = str(row.get('Has Relevant Opening', '')).casefold()
+        opening = ('Proactive enquiry (no public QA opening)' if opening in ('false', 'no')
+                   else 'Current opening' if opening in ('true', 'yes') else 'Current opening (careers board)')
+        email_rows.append([row.get('Company Display Name') or row['Company'], row['Job Title'], opening, recipient,
                            row.get('Email Contact Name') or row.get('Manager Name', ''),
                            state.get('Status') or ('Awaiting Gmail draft creation' if recipient else 'Pending contact research; Excel only'),
                            state.get('Gmail Draft URL', ''), row.get('Cold Email Subject', ''), row.get('Cold Email', ''),
@@ -397,6 +402,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     from jobagent.enrich.exa import exa_search
     from jobagent.llm import make_provider
     from jobagent.outreach.daily_research import candidate_facts, research_company, cached_draft, remaining, META
+    from jobagent.outreach import daily_research as daily_research_module
     cfg = config.get('morning', {})
     out, run_dir = Path(out), Path(run_dir)
     progress('Morning step 1: search jobs, check full descriptions, and prepare the Excel report.')
@@ -541,6 +547,24 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
             apify_rows = assess_apify_leads(apify_state.get('items', []), profile)
             all_rows.extend(apify_rows)
             progress(f'Y Combinator Work at a Startup (via Apify): {len(apify_rows)} QA-relevant postings found.')
+    # Startup-first: hiring YC startups of 10-200 people are checked for a
+    # relevant QA opening on their careers board or website. Openings join
+    # today's jobs; the rest are candidates for a proactive enquiry.
+    from jobagent.outreach import startup_pipeline
+    founder_cfg = cfg.get('founder_emails', {})
+    startup_cfg = {'enabled': True, 'max_companies': 30, 'min_employees': founder_cfg.get('min_employees', 10),
+                   'max_employees': founder_cfg.get('max_employees', 200), **cfg.get('startups', {})}
+    try:
+        startups, startup_checks = startup_pipeline.discover(startup_cfg, profile, run_dir, all_rows, coverage,
+                                                             remaining=lambda: remaining(deadline), progress=progress)
+    except TimeoutError:
+        raise
+    except Exception as exc:
+        issues.append({'stage': 'startup_discovery', 'error': type(exc).__name__})
+        startups, startup_checks = [], []
+    progress(f'Startups checked for QA openings: {len(startup_checks)}; '
+             f'{sum(bool(c.get("has_relevant_opening")) for c in startup_checks)} with a relevant opening, '
+             f'{len(startups)} for a proactive enquiry.')
     from jobagent.report_quality import deduplicate_opportunities, resume_skill_text, review_frameworks
     resume_text = resume_skill_text(ROOT / 'resume' / 'resume_data.py')
     all_rows = [review_frameworks(r, resume_text) for r in all_rows]
@@ -602,6 +626,11 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     sizes_path = state_dir / 'company-size.json'
     sizes = read_json(sizes_path, {})
     size_recheck = discovery.recent_cutoff(today, 30)
+    # The YC directory states team size, so those startups need no search.
+    for check in startup_checks:
+        c = check['company']
+        sizes[company_key(c['name'])] = {'Employee Count': str(c['team_size']), 'Employee Count Source': c.get('url', ''),
+                                         'low': c['team_size'], 'high': c['team_size'], 'checked': today_iso}
     for company in dict.fromkeys(r['Company'] for r in focus if not contacted(r)):
         ck = company_key(company)
         if sizes.get(ck, {}).get('checked', '') >= size_recheck:
@@ -670,106 +699,24 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
             if contact:
                 meta.update(contact, **{'Email Ownership Checked At': now_iso()})
                 progress(f"Hiring email published by {row['Company']} on Hacker News: {contact['Public Work Email']}")
-    # Verified founder / CTO / CEO emails for 10-200 person startups (and YC
-    # companies whose size is unknown) that research left without an address.
+    # Verified leadership emails - founder / CTO / CEO for 10-200 person
+    # startups - from Hunter, then Apollo (free plans, capped), cached per
+    # domain. Openings are enriched before proactive startups, so the scarce
+    # free lookups go to real vacancies first.
     lookups_path = state_dir / 'founder-emails.json'
     lookups = read_json(lookups_path, {})
-    if email_cfg.get('enabled', True):
-        from jobagent.enrich import hunter
-        from jobagent.enrich.email_finder import find_emails
-        # Hunter's free plan (capped, never billed) when its key is present;
-        # the paid Apify verifier only with paid services allowed. Without
-        # either, leaders are still named (greeting, LinkedIn), with no email.
-        if hunter.api_key():
-            finder = hunter.make_finder(state_dir / 'hunter-usage.json', email_cfg.get('hunter_monthly_limit', 50))
-        elif allow_paid:
-            finder = lambda people: find_emails(people, max_charge_per_run_usd=email_cfg.get('max_charge_per_run_usd', 0.5))
-        else:
-            finder = None
-        recheck = discovery.recent_cutoff(today, email_cfg.get('recheck_days', 30))
-        # "No email found" is retried sooner: startups add people and Hunter adds data.
-        recheck_empty = discovery.recent_cutoff(today, email_cfg.get('recheck_empty_days', 7))
-        tally = {'looked_up': 0, 'verified': 0, 'size_unknown': set(), 'outside_size': set()}
-        hunter_usage = state_dir / 'hunter-usage.json'
-        for row in focus:
-            key, ck = row['Company'].casefold(), company_key(row['Company'])
-            meta = metadata.get(key)
-            if meta is None or meta.get('Public Work Email') or contacted(row):
-                continue
-            yc = row.get('Listing Type', '').startswith('Y Combinator')
-            # Unknown size is allowed when Hunter can check it after finding a
-            # verified leader; companies known to be outside 10-200 are skipped.
-            if not (size_rank(row) == 0 or (size_rank(row) == 1 and (yc or (finder is not None and hunter.api_key())))):
-                tally['size_unknown' if size_rank(row) == 1 else 'outside_size'].add(ck)
-                continue
-            earlier = lookups.get(ck, {})
-            if earlier.get('leaders_checked', '') >= recheck:
-                people = earlier.get('people', [])
-            else:
-                remaining(deadline)
-                people = founders.leaders(row, meta, exa_search)
-                # An empty result may only mean search was paused; ask again next run.
-                if people:
-                    earlier.update(leaders_checked=today_iso, people=people)
-            lead = next((p for p in people if (p.get('source') or '').startswith('http')), None)
-            if lead and not meta.get('Manager Name'):
-                # Name and role for the greeting and LinkedIn note, even with no email.
-                meta.update({'Manager Name': lead['name'], 'Manager Role': lead['title'], 'Manager Source': lead['source'],
-                             'Manager LinkedIn': lead['url'] if 'linkedin.com/in/' in lead['url'] else ''})
-            if earlier.get('checked', '') >= (recheck if earlier.get('contact') else recheck_empty):
-                meta.update(earlier.get('contact') or {})
-            elif finder is not None:
-                domain = founders.company_domain(row['Company'], [s.get('url', '') for s in meta.get('_sources', [])]
-                                                 + [row.get('Employer Job Link', '')])
-                try:
-                    contact = {}
-                    if hunter.api_key():
-                        # One Domain Search lists the company's executives with
-                        # verified emails; it needs no name, and no website
-                        # either (the company name is enough).
-                        executives = hunter.executives(founders.plain_name(row['Company']), domain, hunter_usage,
-                                                       email_cfg.get('hunter_monthly_limit', 50))
-                        contact = founders.contact_from_executives(row['Company'], executives, domain_given=bool(domain))
-                        if contact and size_rank(row) == 1:
-                            # Size unknown: Hunter's company lookup decides.
-                            email_domain = contact['Public Work Email'].split('@')[1]
-                            size = hunter.company_size(email_domain, hunter_usage, email_cfg.get('hunter_monthly_limit', 50))
-                            if size:
-                                sizes[ck] = {'Employee Count': founders.size_label(size), 'low': size[0], 'high': size[1],
-                                             'Employee Count Source': f'https://hunter.io (company enrichment for {email_domain})',
-                                             'checked': today_iso}
-                                meta.update({'Employee Count': sizes[ck]['Employee Count'],
-                                             'Employee Count Source': sizes[ck]['Employee Count Source']})
-                                if not founders.in_target(size, *target):
-                                    progress(f"Hunter {row['Company']}: {founders.size_label(size)} employees, outside 10-200; not used.")
-                                    contact = {}
-                        leaders_listed = [e for e in executives if founders.LEADER.search(e.get('title', ''))]
-                        progress(f"Hunter {row['Company']} ({domain or 'by name'}): {len(executives)} executives listed"
-                                 f" for {executives[0]['organization'] if executives else 'no match'}; "
-                                 f"leaders: {', '.join(e['title'] + (' (verified)' if e['verified'] else '') for e in leaders_listed[:3]) or 'none'}; "
-                                 f"{'verified email used' if contact else 'no verified leader email'}.")
-                    if not contact and people and domain:
-                        contact = founders.verified_contact(people, domain, finder)
-                except Exception as exc:
-                    # Not recorded as checked, so the next run tries again.
-                    issues.append({'stage': 'founder_email', 'company': row['Company'], 'error': getattr(exc, 'kind', type(exc).__name__)})
-                    contact = None
-                    if getattr(exc, 'kind', '') == 'free_limit_reached':
-                        progress('Free email-lookup allowance used for this month; remaining companies keep a named leader only.')
-                        finder = None
-                if contact is not None:
-                    tally['looked_up'] += 1
-                    earlier.update(checked=today_iso, domain=domain, contact=contact)
-                    meta.update(contact)
-                    if contact:
-                        tally['verified'] += 1
-                        progress(f"Verified email for {contact['Email Contact Role']} at {row['Company']}.")
-            lookups[ck] = earlier
-        atomic_json(lookups_path, lookups)
+    for s in startups:
+        metadata.setdefault(s['Company'].casefold(), {
+            **{k: s.get(k, '') for k in META}, 'Domain': s['Domain'],
+            '_sources': [{'url': s['Website']}], 'Research Checked At': now_iso()})
+    if founder_cfg.get('enabled', True):
+        issues += startup_pipeline.enrich_contacts(
+            [*focus, *startups], metadata, sizes, lookups, founder_cfg, state_dir, today,
+            search=exa_search, allow_paid=allow_paid, contacted=contacted,
+            remaining=lambda: remaining(deadline), progress=progress)
         atomic_json(sizes_path, sizes)
-        progress(f"Founder emails: {tally['looked_up']} startups looked up, {tally['verified']} verified; "
-                 f"{len(tally['size_unknown'])} skipped because company size is unknown, "
-                 f"{len(tally['outside_size'])} outside 10-200 people.")
+    verified_contacts = sum(bool(founders.verified_leadership_contact(m)) for m in metadata.values())
+    progress(f'Verified founder/CTO/CEO emails available today: {verified_contacts}.')
     def priority(row):
         meta = metadata.get(row['Company'].casefold(), {})
         backing = 0 if re.fullmatch(r'[WSFX]\d{2,4}', meta.get('YC Batch', '').strip(), re.I) or 'y combinator' in meta.get('Investor Backing', '').lower() else 1 if meta.get('Investment Source') else 2
@@ -790,6 +737,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         reused += int(cached)
         roles.append({'Company': row['Company'], 'Job Link': row['Job Link'],
                       **{k: meta.get(k, '') for k in META}, **draft,
+                      **{f: row[f] for f in startup_pipeline.STARTUP_FIELDS if f in row},
                       'Draft JD SHA256': row['JD SHA256'], 'Requires Fit Review': row['Fit Status'] != 'in_scope'})
         if facts.get('resume'):
             try:
@@ -797,6 +745,31 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
             except Exception as exc:
                 issues.append({'stage': 'tailored_resume', 'company': row['Company'], 'error': type(exc).__name__})
         drafted_companies.add(key)
+    # Proactive enquiries to startups with no relevant opening: only with a
+    # verified founder/CTO/CEO email (no blank-To drafts), one per company.
+    proactive_rows = []
+    for s in startups:
+        key = s['Company'].casefold()
+        meta = metadata.get(key, {})
+        if contacted(s) or key in drafted_companies or not founders.verified_leadership_contact(meta, s['Domain']):
+            continue
+        company = {**s['_startup'], 'description': s.get('JD Text', '')}
+        draft = daily_research_module.proactive_draft(company, meta, facts)
+        roles.append({'Company': s['Company'], 'Job Link': s['Job Link'], **{k: meta.get(k, '') for k in META}, **draft,
+                      **{f: s[f] for f in startup_pipeline.STARTUP_FIELDS if f in s}, 'Has Relevant Opening': False,
+                      'Draft JD SHA256': s['JD SHA256'], 'Requires Fit Review': False})
+        if facts.get('resume'):
+            text = ' '.join([company.get('one_liner', ''), *company.get('tags', []), *company.get('industries', [])])
+            try:
+                roles[-1].update(tailored_resume.build_for_row(
+                    facts['resume'], {'Company': s['Company'], 'Job Title': 'Senior QA / SDET', 'JD Text': text,
+                                      'Job Link': s['Job Link']}, out))
+            except Exception as exc:
+                issues.append({'stage': 'tailored_resume', 'company': s['Company'], 'error': type(exc).__name__})
+        proactive_rows.append(s)
+        drafted_companies.add(key)
+    if proactive_rows:
+        progress(f'Proactive enquiries prepared for {len(proactive_rows)} startups with a verified leadership email.')
     from jobagent.outreach.report_drafts import draft_recipient
     new_contacts = sum(bool(draft_recipient(r)) for r in roles)
     others = [r for r in relevant if r not in focus]
@@ -816,6 +789,9 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                'full_jds_omitted_from_display': max(0, len(all_rows)-len(selected)),
                'drafts': len(roles), 'reused_drafts': reused, 'companies_researched': len(metadata),
                'new_contacts': new_contacts, 'boards_added': len(boards_added),
+               'startups_checked': len(startup_checks),
+               'startups_with_relevant_opening': sum(bool(c.get('has_relevant_opening')) for c in startup_checks),
+               'proactive_enquiries': len(proactive_rows),
                'companies_10_to_200_employees': sum(size_rank({'Company': c}) == 0 for c in {r['Company'] for r in focus}),
                'verified_founder_emails': sum(bool((m.get('Email Ownership Status') or '').startswith('Verified deliverable'))
                                               for m in metadata.values()),
@@ -848,7 +824,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     evidence = {k: {'metadata': {f: v for f, v in m.items() if not f.startswith('_')},
                     'sources': m.get('_sources', []), 'errors': m.get('_errors', [])} for k, m in metadata.items()}
     atomic_json(out / 'Contact Research.json', evidence)
-    prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary, state_dir=state_dir)
+    prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary, state_dir=state_dir, proactive=proactive_rows)
     progress(summary['headline'])
     augment_manifest(out, ['All Job Decisions.csv', 'Discovery Leads.csv', 'Research Notes.md', 'Contact Research.json', 'Duplicate Listings.csv'])
     if cfg.get('gmail_drafts'):
@@ -879,7 +855,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
             except Exception as exc:
                 summary['issues'].append({'stage':'followups','error':type(exc).__name__})
                 summary['status'] = 'partial'
-        prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary, state_dir=state_dir)
+        prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary, state_dir=state_dir, proactive=proactive_rows)
     return summary
 
 

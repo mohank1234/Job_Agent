@@ -71,7 +71,21 @@ morning:
     max_employees: 200
     recheck_days: 30
     hunter_monthly_limit: 50       # the free plan's monthly credits
+    recheck_empty_days: 7          # "no verified email found" is retried after this
+    # Optional: APOLLO_API_KEY (free plan, work-email account). People search
+    # is free; only the best-ranked leader is revealed, capped here.
+    apollo_monthly_limit: 10
     max_charge_per_run_usd: 0.5
+  # Startup-first: hiring Y Combinator startups (public directory mirror,
+  # free) of min..max_employees people are checked each day for a relevant QA
+  # opening on their careers board or website. Openings join the day's jobs;
+  # startups without one get a short proactive enquiry, but only when a
+  # verified founder/CTO/CEO email exists. Contact order: up to 50 people
+  # Founder/Co-founder, CTO, CEO; larger: CTO, technical co-founder,
+  # Founder/CEO, then VP/Head of Engineering. One approach per company.
+  startups:
+    enabled: true
+    max_companies: 30              # startups checked per day, least recently checked first
   # Y Combinator's "Work at a Startup" board (1,000+ live postings) has no
   # public API of its own, unlike companies.yaml's board slugs. This calls a
   # paid Apify actor (nomad-agent/ycombinator-was-scraper) instead - real

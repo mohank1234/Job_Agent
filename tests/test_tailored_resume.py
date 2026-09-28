@@ -29,7 +29,7 @@ def test_pdf_is_readable_text_and_byte_stable(tmp_path):
     pypdf = pytest.importorskip("pypdf")
     first = tailored_resume.build_for_row(RESUME, ROW, tmp_path)
     path = tmp_path / first["Resume File"]
-    assert path.name == "Candidate_Resume.pdf" and path.read_bytes().startswith(b"%PDF-")
+    assert path.name == "Candidate_Senior_QA_SDET_5Yrs.pdf" and path.read_bytes().startswith(b"%PDF-")
     text = pypdf.PdfReader(str(path)).pages[0].extract_text()
     assert "PROFESSIONAL EXPERIENCE" in text and "Playwright" in text
     before = path.read_bytes()
@@ -58,4 +58,23 @@ def test_each_draft_gets_its_own_tailored_resume(tmp_path):
     results = sync_report_drafts(tmp_path, "candidate@example.com", ledger_path=tmp_path / "ledger.json", service=service)
     assert [r["Status"] for r in results] == ["Created and read back"] * 2
     attached = [decode_draft(service.data[k])["attachments"] for k in ("1", "2")]
-    assert all(a[0]["filename"] == "Candidate_Resume.pdf" and a[0]["mime_type"] == "application/pdf" for a in attached)
+    assert all(a[0]["filename"] == "Candidate_Senior_QA_SDET_5Yrs.pdf" and a[0]["mime_type"] == "application/pdf" for a in attached)
+
+
+@pytest.mark.parametrize("title, role", [
+    ("Senior SDET", "Senior_QA_SDET"),
+    ("SDET", "QA_SDET"),
+    ("QA Automation Engineer", "QA_Automation_Engineer"),
+    ("Senior QA Engineer", "Senior_QA_Engineer"),
+    ("AI QA Engineer", "AI_QA_Engineer"),
+    ("LLM Quality Engineer", "AI_QA_Engineer"),
+    ("Agentic AI QA", "AI_QA_Engineer"),
+    ("QA Engineer", "QA_Engineer"),
+    ("Software Engineer in Test", "QA_SDET"),
+    ("", "Resume"),
+])
+def test_professional_role_specific_filename(title, role):
+    data = {**RESUME, "NAME": "Krishna Mohan B"}
+    filename = tailored_resume.file_name(data, title)
+    assert filename == f"Krishna_Mohan_B_{role}_5Yrs.pdf"
+    assert "ATS" not in filename.upper()

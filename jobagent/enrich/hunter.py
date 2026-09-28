@@ -23,6 +23,8 @@ from pathlib import Path
 import httpx
 
 from ._errors import AdapterError, classify_http_error
+from jobagent.runtime import atomic_json
+from jobagent.outreach.founders import professional_domain, professional_email
 
 API = "https://api.hunter.io/v2"
 TIMEOUT = httpx.Timeout(30.0, connect=10.0)
@@ -36,14 +38,29 @@ def api_key():
 
 def _usage(path):
     month = datetime.now(timezone.utc).strftime("%Y-%m")
-    data = json.loads(Path(path).read_text(encoding="utf-8")) if Path(path).exists() else {}
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8")) if Path(path).exists() else {}
+        if not isinstance(data, dict) or not isinstance(data.get("searches", 0), int) or data.get("searches", 0) < 0:
+            raise ValueError("Invalid usage counter")
+    except (OSError, ValueError) as exc:
+        raise HunterError("free_limit_reached", "Hunter usage counter unreadable; lookups disabled") from exc
     return data if data.get("month") == month else {"month": month, "searches": 0}
+
+
+def _refused(resp):
+    if resp.status_code in (401, 402, 403, 422, 429):
+        raise HunterError("free_limit_reached", f"Hunter refused the request (HTTP {resp.status_code})")
 
 
 def account_searches_left(key, get=httpx.get):
     """Searches left this month according to Hunter, or None if not reported."""
     try:
-        data = get(f"{API}/account", params={"api_key": key}, timeout=TIMEOUT).json().get("data", {})
+        resp = get(f"{API}/account", params={"api_key": key}, timeout=TIMEOUT)
+        _refused(resp)
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+    except HunterError:
+        raise
     except Exception:
         return None
     # Older plans report "searches"; current plans report shared "credits"
@@ -59,7 +76,10 @@ def account_searches_left(key, get=httpx.get):
 def _spend_check(usage_path, monthly_limit, key, get):
     import calendar
     import math
+    if not key:
+        raise HunterError("free_limit_reached", "HUNTER_API_KEY is not set")
     usage = _usage(usage_path)
+    monthly_limit = max(0, int(monthly_limit))
     now = datetime.now(timezone.utc)
     if usage.get("day") != now.strftime("%Y-%m-%d"):
         usage.update(day=now.strftime("%Y-%m-%d"), before_today=usage["searches"])
@@ -78,19 +98,20 @@ def _spend_check(usage_path, monthly_limit, key, get):
 
 def _count(usage_path, usage):
     usage["searches"] += 1
-    Path(usage_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(usage_path).write_text(json.dumps(usage), encoding="utf-8")
+    atomic_json(Path(usage_path), usage)
 
 
 def company_size(domain, usage_path, monthly_limit=50, get=httpx.get):
     """(low, high) employees from Hunter Company Enrichment ("11-50" or a count),
     or None. Counted as one credit whenever Hunter returns the company."""
+    domain = professional_domain(domain)
+    if not domain:
+        return None
     key = api_key()
     usage = _spend_check(usage_path, monthly_limit, key, get)
     try:
         resp = get(f"{API}/companies/find", params={"domain": domain, "api_key": key}, timeout=TIMEOUT)
-        if resp.status_code == 429:
-            raise HunterError("free_limit_reached", "Hunter usage limit reached")
+        _refused(resp)
         if resp.status_code >= 400:
             return None
         data = resp.json().get("data") or {}
@@ -114,14 +135,18 @@ def executives(company, domain, usage_path, monthly_limit=50, get=httpx.get):
     """Domain Search for a company's executives: [{name, title, email, verified,
     linkedin, source, domain}]. Uses one credit only when people come back.
     Works from the company name alone when its website is unknown."""
+    if domain and not professional_domain(domain):
+        return []
+    domain = professional_domain(domain)
+    if not domain and (not company or not re.fullmatch(r"[\w .,&'()+-]{2,120}", company)):
+        return []
     key = api_key()
     usage = _spend_check(usage_path, monthly_limit, key, get)
     params = {"api_key": key, "seniority": "executive", "type": "personal", "limit": 10}
     params.update({"domain": domain} if domain else {"company": company})
     try:
         resp = get(f"{API}/domain-search", params=params, timeout=TIMEOUT)
-        if resp.status_code == 429:
-            raise HunterError("free_limit_reached", "Hunter usage limit reached")
+        _refused(resp)
         if resp.status_code in (400, 404):
             return []
         resp.raise_for_status()
@@ -133,13 +158,16 @@ def executives(company, domain, usage_path, monthly_limit=50, get=httpx.get):
     emails = data.get("emails") or []
     if emails:
         _count(usage_path, usage)
-    found_domain = (data.get("domain") or domain or "").lower()
+    found_domain = professional_domain(data.get("domain") or domain or "")
+    if not found_domain or (domain and found_domain != domain):
+        return []
     people = []
     for e in emails:
         name = " ".join(p for p in (e.get("first_name"), e.get("last_name")) if p)
         source = next((s.get("uri") for s in e.get("sources") or [] if (s.get("uri") or "").startswith("http")), "")
         people.append({"name": name, "title": e.get("position") or "", "email": e.get("value") or "",
-                       "verified": (e.get("verification") or {}).get("status") == "valid",
+                       "verified": ((e.get("verification") or {}).get("status") == "valid"
+                                    and professional_email(e.get("value") or "", found_domain)),
                        "linkedin": e.get("linkedin") or "", "source": source, "domain": found_domain,
                        "organization": data.get("organization") or "", "confidence": e.get("confidence")})
     return people
@@ -153,13 +181,15 @@ def make_finder(usage_path, monthly_limit=50, get=httpx.get):
     def finder(people):
         found = {}
         for person in people:
+            domain = professional_domain(person.get("domain"))
+            if not domain:
+                continue
             usage = _spend_check(usage_path, monthly_limit, key, get)
             try:
                 resp = get(f"{API}/email-finder", timeout=TIMEOUT,
-                           params={"domain": person["domain"], "first_name": person["firstName"],
+                           params={"domain": domain, "first_name": person["firstName"],
                                    "last_name": person["surname"], "api_key": key})
-                if resp.status_code == 429:
-                    raise HunterError("free_limit_reached", "Hunter usage limit reached")
+                _refused(resp)
                 if resp.status_code == 404:
                     continue
                 resp.raise_for_status()
@@ -172,7 +202,7 @@ def make_finder(usage_path, monthly_limit=50, get=httpx.get):
                 # Counted only when an email came back: that is when Hunter charges.
                 _count(usage_path, usage)
             status = (data.get("verification") or {}).get("status")
-            if data.get("email") and status == "valid":
+            if status == "valid" and professional_email(data.get("email"), domain):
                 found[(person["firstName"].casefold(), person["surname"].casefold())] = {
                     "email": data["email"], "validationStatus": "Hunter verified: valid",
                     "overallScore": data.get("score", "n/a")}
