@@ -56,6 +56,35 @@ def check_apollo():
     return f"Apollo: not usable (HTTP {resp.status_code}: {hints.get(resp.status_code, 'unexpected response')}). {detail}"
 
 
+def check_apollo_enrichment():
+    """One People Enrichment lookup by name + domain (uses 1 free credit if a
+    match is returned; the free plan cannot bill). Only run on request."""
+    key = os.environ.get("APOLLO_API_KEY", "").strip()
+    if not key:
+        return "Apollo enrichment: no APOLLO_API_KEY secret."
+    resp = httpx.post("https://api.apollo.io/api/v1/people/match", timeout=30,
+                      headers={"x-api-key": key, "Content-Type": "application/json", "Cache-Control": "no-cache"},
+                      json={"first_name": "Tim", "last_name": "Zheng", "domain": "apollo.io",
+                            "reveal_personal_emails": False, "reveal_phone_number": False})
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    if resp.status_code != 200:
+        return f"Apollo enrichment: not usable (HTTP {resp.status_code}): {str(data or resp.text)[:220]}"
+    person = data.get("person") or {}
+    if not person:
+        return "Apollo enrichment: allowed on this plan, but the test person was not matched (no credit used)."
+    email = person.get("email") or ""
+    shown = (email[:2] + "***@" + email.split("@")[1]) if "@" in email else "none"
+    return (f"Apollo enrichment: WORKS on this plan - matched {person.get('title') or 'person'} at "
+            f"{(person.get('organization') or {}).get('name') or 'the company'}; email {shown}, "
+            f"status {person.get('email_status') or 'unknown'}.")
+
+
 if __name__ == "__main__":
-    for line in (check_hunter(), check_apollo()):
+    checks = [check_hunter(), check_apollo()]
+    if "--apollo-enrichment" in sys.argv:
+        checks.append(check_apollo_enrichment())
+    for line in checks:
         print(line)

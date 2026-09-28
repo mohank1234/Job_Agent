@@ -31,6 +31,10 @@ on:
         description: 'Search and publish with outreach saved as drafts; send no outreach, follow-ups, or status emails.'
         type: boolean
         default: false
+      apollo_enrichment_test:
+        description: 'With validate only: also try one Apollo email lookup by name (uses 1 free Apollo credit).'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -98,7 +102,12 @@ jobs:
         env:
           HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
           APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
-        run: python tools/check_contact_providers.py
+        run: |
+          if [ "${{ github.event.inputs.apollo_enrichment_test }}" = "true" ]; then
+            python tools/check_contact_providers.py --apollo-enrichment
+          else
+            python tools/check_contact_providers.py
+          fi
 
       - name: Reset today's completion marker (manual force-run only)
         if: github.event.inputs.force_run == 'true' && github.event.inputs.validate_only != 'true'
