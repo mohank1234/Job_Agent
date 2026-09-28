@@ -2,9 +2,9 @@ name: Daily job search
 
 # Runs the same `python run.py morning` pipeline the laptop's Task Scheduler
 # runs locally (see Install-Report-Schedule.ps1), but on GitHub's servers so
-# it fires even when the laptop is off. Outreach to companies only ever
-# becomes a Gmail DRAFT and a "JobAgent Output" Drive update — nothing to a
-# third party is ever sent automatically; review and send those by hand.
+# it fires even when the laptop is off. Outreach follows the configured Gmail
+# mode; manual drafts_only runs save drafts and update "JobAgent Output"
+# without sending outreach, follow-ups, or status emails.
 # Separately, a same-account status email (real results, no outreach) is
 # sent to yourself each day real work completes - see jobagent/notify.py.
 #
@@ -25,6 +25,10 @@ on:
         default: false
       validate_only:
         description: 'Check saved setup and Google connections without searching, sending emails, or saving a checkpoint.'
+        type: boolean
+        default: false
+      drafts_only:
+        description: 'Search and publish with outreach saved as drafts; send no outreach, follow-ups, or status emails.'
         type: boolean
         default: false
 
@@ -89,7 +93,22 @@ jobs:
 
       - name: Reset today's completion marker (manual force-run only)
         if: github.event.inputs.force_run == 'true' && github.event.inputs.validate_only != 'true'
-        run: python -c "import json,pathlib; from datetime import datetime,timezone,timedelta; p=pathlib.Path('research/morning-private/ledger.json'); d=json.loads(p.read_text()) if p.exists() else {'version':1,'days':{}}; key=(datetime.now(timezone.utc)+timedelta(hours=5,minutes=30)).date().isoformat(); d['days'].pop(key, None); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(d)); print('reset', key)"
+        # Also clears today's saved searches, so a forced run searches afresh
+        # instead of replaying this morning's checkpoints.
+        run: python -c "import json,pathlib,shutil; from datetime import datetime,timezone,timedelta; p=pathlib.Path('research/morning-private/ledger.json'); d=json.loads(p.read_text()) if p.exists() else {'version':1,'days':{}}; key=(datetime.now(timezone.utc)+timedelta(hours=5,minutes=30)).date().isoformat(); d['days'].pop(key, None); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(d)); shutil.rmtree(p.parent / key, ignore_errors=True); print('reset', key)"
+
+      - name: Use drafts-only outreach for this run
+        if: github.event.inputs.drafts_only == 'true' && github.event.inputs.validate_only != 'true'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          path = Path('config.yaml')
+          config = yaml.safe_load(path.read_text(encoding='utf-8'))
+          config.setdefault('outreach', {}).setdefault('gmail', {})['mode'] = 'draft_only'
+          path.write_text(yaml.safe_dump(config, sort_keys=False), encoding='utf-8')
+          print('Outreach drafts only; automatic sends and follow-ups disabled for this run.')
+          PY
 
       - name: Run morning pipeline
         id: morning
@@ -121,7 +140,7 @@ jobs:
           fi
 
       - name: Send daily results email
-        if: steps.morning.outcome == 'success' && github.event.inputs.validate_only != 'true'
+        if: steps.morning.outcome == 'success' && github.event.inputs.validate_only != 'true' && github.event.inputs.drafts_only != 'true'
         run: python tools/send_run_email.py
 
       - name: Encrypt persistent state
@@ -144,7 +163,7 @@ jobs:
       # Settings -> Notifications -> Actions) is the independent backup for
       # exactly that case.
       - name: Send failure alert email
-        if: failure() && github.event.inputs.validate_only != 'true'
+        if: failure() && github.event.inputs.validate_only != 'true' && github.event.inputs.drafts_only != 'true'
         continue-on-error: true
         env:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -48,6 +48,17 @@ selected. If the OAuth app is External and still in **Testing**, Google expires
 refresh tokens for these scopes after seven days. Check its publishing status
 before reconnecting; see [Google's refresh-token expiration rules](https://developers.google.com/identity/protocols/oauth2#expiration).
 
+After validation succeeds, recover today's missed search outside its normal
+window while keeping outreach as drafts:
+
+```powershell
+gh workflow run daily-job-search.yml --repo mohank1234/Job_Agent -f force_run=true -f drafts_only=true
+```
+
+`drafts_only` overrides the Gmail mode for that run and suppresses outreach,
+follow-ups, and status or failure emails. It still publishes the report to Drive
+and saves progress. Later scheduled runs use the configured Gmail mode again.
+
 The morning workflow uses the configured research model (currently Gemini),
 and composes outreach from actual resume bullets and the current JD. It never
 sends messages. All drafts require user approval; LinkedIn notes are at most

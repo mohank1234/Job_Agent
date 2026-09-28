@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 import yaml
 
+from jobagent import discovery
 from jobagent.models import Job, infer_workplace
 from jobagent.output import QA_TITLE, partition, make_workbook
 from jobagent.outreach.verification import board_ref, canonical, fetch_board, verify_row, csv_text, evidence_markdown, employer_posting, get_public
@@ -25,6 +26,9 @@ BOARD_URLS = {"greenhouse": "https://job-boards.greenhouse.io/{}/jobs",
               "phonepe": "https://www.phonepe.com/careers/job-openings/"}
 BOARD_ALIASES = {('greenhouse','ocrolus'):('greenhouse','ocrolusinc'),
                  ('greenhouse','phonepe'):('phonepe','phonepe')}
+# Work at a Startup lists roughly a thousand live postings in total, so this
+# returns every match for the day's search terms.
+YC_ALL_ITEMS = 1000
 EXPERIENCE = re.compile(r"(?<![\d.])(\d{1,2})(?:\s*(?:[-\u2013\u2014]|to)\s*(\d{1,2}))?\s*(\+)?\s*(?:years?|yrs?)\b", re.I)
 
 
@@ -300,14 +304,38 @@ def augment_manifest(out, names):
     atomic_json(path, data)
 
 
-def prepare_report(out, rows, coverage, research, summary):
+def whats_new(tabs, state_dir, today, summary):
+    """Today's change against earlier runs, so an unchanged report is obvious."""
+    open_rows = [*tabs["Ready to review"], *tabs["Fit needs checking"]]
+    path = Path(state_dir) / "company-first-seen.json"
+    companies = read_json(path, {})
+    before = dict(companies)
+    for row in open_rows:
+        key = discovery.company_key(row.get("Company", ""))
+        if key and (key not in companies or row["Date"] < companies[key]):
+            companies[key] = row["Date"]
+    if companies != before:
+        atomic_json(path, companies)
+    new_companies = {discovery.company_key(r.get("Company", "")) for r in tabs["New today"]
+                     if companies.get(discovery.company_key(r.get("Company", ""))) == today}
+    counts = {"new_jobs": len(tabs["New today"]), "still_open": len(open_rows) - len(tabs["New today"]),
+              "new_companies": len(new_companies), "new_contacts": summary.get("new_contacts", 0),
+              "boards_added": summary.get("boards_added", 0)}
+    headline = (f"{counts['new_jobs']} new jobs, {counts['new_companies']} new companies, "
+                f"{counts['new_contacts']} new contacts; {counts['still_open']} still open from earlier. "
+                f"{counts['boards_added']} careers boards added to the watch list.")
+    return counts, headline
+
+
+def prepare_report(out, rows, coverage, research, summary, *, state_dir=STATE):
     from jobagent.startup_output import enrich_rows, write_outreach
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     today = datetime.now(IST).date().isoformat()
     shortlist = enrich_rows(rows, research)
-    tabs = partition(rows, first_seen_path=STATE / "first-seen.json", today=today)
+    tabs = partition(rows, first_seen_path=Path(state_dir) / "first-seen.json", today=today)
     summary.update(checked=len(rows), counts={k: len(v) for k, v in tabs.items()}, startup_shortlist_count=len(shortlist))
+    summary["whats_new"], summary["headline"] = whats_new(tabs, state_dir, today, summary)
     grid = write_outreach(out, shortlist)
     atomic_json(out / "startup-research.json", research)
     (out / "verified.csv").write_text(csv_text(rows), encoding="utf-8-sig")
@@ -368,33 +396,89 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     out, run_dir = Path(out), Path(run_dir)
     progress('Morning step 1: search jobs, check full descriptions, and prepare the Excel report.')
     issues = []
+    state_dir = run_dir.parent
+    today = datetime.now(IST).date()
+    llm_base = config.get('llm', {})
+    # Hosted APIs answer in seconds, so a short cap keeps a stuck call from eating
+    # the window. A local model needs its full timeout or every call is abandoned.
+    research_timeout = llm_base.get('research_timeout_seconds',
+                                    llm_base.get('timeout_seconds', 900) if llm_base.get('provider') == 'ollama' else 25)
+    llm_config = {**llm_base, 'timeout_seconds': research_timeout, 'max_tokens': 5000}
+    provider = None
+    try:
+        provider = make_provider(llm_config)
+    except Exception as exc:
+        issues.append({'stage': 'research_provider', 'error': type(exc).__name__})
     discovery_path = run_dir / 'discovery.json'
     if not discovery_path.exists():
         results, errors = [], []
-        for query in cfg.get('discovery_queries', []):
+        # Fixed configured searches, plus profile-built searches that change
+        # daily and only return ATS pages, so every hit names a careers board.
+        rotating = discovery.daily_job_queries(profile, today, cfg.get('rotating_queries', 6))
+        searches = [(q, {}) for q in cfg.get('discovery_queries', [])]
+        searches += [(q, {'include_domains': discovery.ATS_DOMAINS}) for q in rotating]
+        for query, extra in searches:
             remaining(deadline)
             try:
-                results.extend(exa_search(query, 10, max_characters=1500))
+                results.extend(exa_search(query, 10, max_characters=1500, **extra))
             except Exception as exc:
                 errors.append(type(exc).__name__)
-        atomic_json(discovery_path, {'results': results, 'errors': errors, 'checked_at': now_iso()})
-    discovery = read_json(discovery_path, {})
-    issues += [{'stage': 'discovery', 'error': e} for e in discovery.get('errors', [])]
+        atomic_json(discovery_path, {'queries': [q for q, _ in searches], 'results': results,
+                                     'errors': errors, 'checked_at': now_iso()})
+    found = read_json(discovery_path, {})
+    issues += [{'stage': 'discovery', 'error': e} for e in found.get('errors', [])]
+    growth_path = run_dir / 'new-companies.json'
+    if not growth_path.exists():
+        progress('Looking for newly funded and fast-growing companies.')
+        errors, names, results = [], [], []
+        queries = discovery.daily_growth_queries(profile, today, cfg.get('growth_queries', 3))
+        for query in queries:
+            remaining(deadline)
+            try:
+                results.extend(exa_search(query, 10, max_characters=3000,
+                                          start_published_date=discovery.recent_cutoff(today, 30)))
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        if results and provider is None:
+            errors.append('NoLanguageModel')
+        try:
+            names = discovery.extract_companies(provider, results)
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+        leads_path = state_dir / 'company-leads.json'
+        known = read_json(leads_path, {})
+        boards = discovery.find_new_boards(names, known, search=exa_search,
+                                           max_search=cfg.get('board_lookup_searches'),
+                                           remaining=lambda: remaining(deadline))
+        atomic_json(leads_path, known)
+        atomic_json(growth_path, {'queries': queries, 'companies': names, 'boards': boards,
+                                  'errors': errors, 'checked_at': now_iso()})
+    growth = read_json(growth_path, {})
+    issues += [{'stage': 'company_discovery', 'error': e} for e in growth.get('errors', [])]
+    progress(f"Company discovery: {len(growth.get('companies', []))} companies named in recent news; "
+             f"{len(growth.get('boards', []))} new careers boards found.")
     seeds = read_json(run_dir.parent / 'seed-research.json', {'roles': []})
     old = read_json(out / 'startup-research.json', {'roles': []})
     company_key = lambda name: re.sub(r'[^a-z0-9]', '', name.casefold())
     by_company = {company_key(r['Company']): r for r in [*seeds['roles'], *old['roles']]}
     reviewed = read_json(ROOT / cfg['reviewed_contacts_file'], {}) if cfg.get('reviewed_contacts_file') else {}
-    urls = [r['url'] for r in discovery.get('results', [])]
+    watched = read_json(run_dir.parent / 'discovered-boards.json', [])
+    urls = [r['url'] for r in found.get('results', [])]
+    urls += growth.get('boards', [])
     urls += [r['Job Link'] for r in old['roles']]
-    urls += read_json(run_dir.parent / 'discovered-boards.json', [])
+    urls += watched
     directory = board_directory(yaml.safe_load((ROOT / 'companies.yaml').read_text(encoding='utf-8')), urls)
     # A resumed run uses its fixed source inventory, so a retry is not a second search.
     directory_path = run_dir / 'directory.json'
+    added_path = run_dir / 'boards-added.json'
     if directory_path.exists():
         directory = {(r['vendor'], r['slug']): r['url'] for r in read_json(directory_path, [])}
     else:
+        atomic_json(added_path, sorted(set(directory.values()) - set(watched)))
         atomic_json(directory_path, [{'vendor': k[0], 'slug': k[1], 'url': v} for k, v in directory.items()])
+    boards_added = read_json(added_path, [])
+    if boards_added:
+        progress(f'{len(boards_added)} careers boards added to the permanent watch list today.')
     atomic_json(run_dir.parent / 'discovered-boards.json', sorted(set(directory.values())))
     coverage = collect_boards(directory, run_dir / 'boards', workers=cfg.get('workers', 6), deadline=deadline, progress=progress)
     remaining(deadline)
@@ -406,9 +490,16 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         if not apify_path.exists():
             try:
                 from jobagent.enrich.apify_yc import fetch_yc_jobs
-                items = fetch_yc_jobs(apify_cfg.get('queries') or ['QA', 'SDET', 'quality engineer', 'software test engineer'],
-                                       max_items=apify_cfg.get('max_items', 40),
-                                       max_total_charge_usd=apify_cfg.get('max_total_charge_usd', 0.15))
+                # The same few terms return the same postings every day, so
+                # rotate through the configured terms plus the profile's titles.
+                pool = [*(apify_cfg.get('queries') or ['QA', 'SDET', 'quality engineer', 'software test engineer']),
+                        *discovery.profile_terms(profile)[0]]
+                # Every matching posting, not a first page. The charge ceiling
+                # only guards against a runaway actor: it covers the whole
+                # item allowance at the published per-job price.
+                items = fetch_yc_jobs(discovery.daily_subset(pool, today, apify_cfg.get('queries_per_day', 5)),
+                                       max_items=YC_ALL_ITEMS,
+                                       max_total_charge_usd=max(apify_cfg.get('max_total_charge_usd', 0), YC_ALL_ITEMS * 0.0025))
                 atomic_json(apify_path, {'items': items, 'error': None, 'checked_at': now_iso()})
             except Exception as exc:
                 atomic_json(apify_path, {'items': [], 'error': type(exc).__name__, 'checked_at': now_iso()})
@@ -440,14 +531,8 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                     'Status': 'External posting URL; not verified by supported ATS adapter'}
                    for s in coverage for j in s.get('jobs', []) if not board_ref(employer_posting(_load_job(j),s['Vendor'],s['Company']).url)]
     discovery_rows = [{'Company': '', 'Job Title': r['title'], 'Job Link': r['url'],
-                       'Status': 'Search discovery only; check All Job Decisions for a verified match'} for r in discovery.get('results', [])]
+                       'Status': 'Search discovery only; check All Job Decisions for a verified match'} for r in found.get('results', [])]
     (out / 'Discovery Leads.csv').write_text(csv_text([*unsupported, *discovery_rows], ['Company', 'Job Title', 'Job Link', 'Status']), encoding='utf-8-sig')
-    llm_config = {**config.get('llm', {}), 'timeout_seconds': 25, 'max_tokens': 5000}
-    provider = None
-    try:
-        provider = make_provider(llm_config)
-    except Exception as exc:
-        issues.append({'stage': 'research_provider', 'error': type(exc).__name__})
     facts = candidate_facts(ROOT / 'resume' / 'resume_data.py')
     facts['phone'] = str(cfg.get('signature_phone') or '').strip()
     resume_path = ROOT / cfg['resume_attachment'] if cfg.get('resume_attachment') else None
@@ -456,31 +541,56 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         load_resume(resume_path)
     facts['resume_attached'] = bool(resume_path)
     metadata = {}
+    # Fresh companies first: a company already contacted is left to the
+    # follow-up step, and one researched on a recent earlier day waits until
+    # companies not yet looked at have had their turn.
+    today_iso = today.isoformat()
+    first_seen = read_json(state_dir / 'first-seen.json', {})
+    ledger = read_json(ROOT / 'gmail_report_drafts.json', {})
+    history_path = state_dir / 'company-history.json'
+    history = read_json(history_path, {})
+    cooldown = discovery.recent_cutoff(today, cfg.get('research_cooldown_days', 14))
+    def contacted(row):
+        return hashlib.sha256(company_key(row['Company']).encode()).hexdigest()[:24] in ledger
+    def freshness(row):
+        last = history.get(company_key(row['Company']), {}).get('researched', '')
+        return (contacted(row), cooldown <= last < today_iso,
+                first_seen.get(canonical(row['Job Link']), today_iso) != today_iso)
     # Previously evidenced startups get first attention; no salary-based bonus.
-    focus.sort(key=lambda r: (not bool(by_company.get(company_key(r['Company']), {}).get('Investment Source')),
+    focus.sort(key=lambda r: (*freshness(r), not bool(by_company.get(company_key(r['Company']), {}).get('Investment Source')),
                               r['Fit Status'] != 'in_scope', -float(r.get('Rule Score') or 0)))
+    # No company-count cap: every fresh company is researched while time
+    # allows, and research stops early enough to leave time for the report.
+    research_until = deadline - timedelta(minutes=cfg.get('report_reserve_minutes', 20)) if deadline else None
     for row in focus:
         key = row['Company'].casefold()
-        if key in metadata or len(metadata) >= cfg.get('max_company_research', 15):
+        if contacted(row) or key in metadata:
             continue
+        if research_until and datetime.now(timezone.utc) >= research_until:
+            issues.append({'stage': 'company_research', 'error': 'StoppedToLeaveTimeForReport'})
+            break
         remaining(deadline)
         progress(f'Researching public leadership and investor evidence: {row["Company"]}')
         metadata[key] = research_company(row, run_dir / 'companies', provider, seed=by_company.get(company_key(key)), deadline=deadline)
         from jobagent.outreach.daily_research import apply_reviewed_contact
         metadata[key] = apply_reviewed_contact(metadata[key], reviewed.get(company_key(key)))
         issues += [{'stage': 'company_research', 'company': row['Company'], 'error': e} for e in metadata[key].get('_errors', [])]
+    for key in metadata:
+        history.setdefault(company_key(key), {})['researched'] = today_iso
+    atomic_json(history_path, history)
     def priority(row):
         meta = metadata.get(row['Company'].casefold(), {})
         backing = 0 if re.fullmatch(r'[WSFX]\d{2,4}', meta.get('YC Batch', '').strip(), re.I) or 'y combinator' in meta.get('Investor Backing', '').lower() else 1 if meta.get('Investment Source') else 2
-        return (backing, row['Fit Status'] != 'in_scope', -float(row.get('Rule Score') or 0))
+        return (*freshness(row), backing, row['Fit Status'] != 'in_scope', -float(row.get('Rule Score') or 0))
     focus.sort(key=priority)
     roles, drafted_companies, reused = [], set(), 0
     for row in focus:
         remaining(deadline)
         key = row['Company'].casefold()
-        meta = metadata.get(key, {'Research Checked At': now_iso(), 'Contact Status': 'Research budget reached; no contact claim'})
+        default = 'Already contacted; follow-up only' if contacted(row) else 'Research budget reached; no contact claim'
+        meta = metadata.get(key, {'Research Checked At': now_iso(), 'Contact Status': default})
         row.update({k: meta.get(k, '') for k in META})
-        if key in drafted_companies or len(roles) >= cfg.get('max_drafts', 25):
+        if contacted(row) or key in drafted_companies:
             continue
         draft, cached = cached_draft(row, meta, facts, run_dir.parent / 'drafts')
         reused += int(cached)
@@ -488,6 +598,8 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                       **{k: meta.get(k, '') for k in META}, **draft,
                       'Draft JD SHA256': row['JD SHA256'], 'Requires Fit Review': row['Fit Status'] != 'in_scope'})
         drafted_companies.add(key)
+    from jobagent.outreach.report_drafts import draft_recipient
+    new_contacts = sum(bool(draft_recipient(r)) for r in roles)
     others = [r for r in relevant if r not in focus]
     excluded = [r for r in all_rows if r['Fit Status'] == 'out_of_scope']
     selected = [*focus, *others, *excluded][:cfg.get('max_report_rows', 150)]
@@ -504,6 +616,9 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                'focus_roles': len(focus), 'experience_needs_clarification': len(others),
                'full_jds_omitted_from_display': max(0, len(all_rows)-len(selected)),
                'drafts': len(roles), 'reused_drafts': reused, 'companies_researched': len(metadata),
+               'new_contacts': new_contacts, 'boards_added': len(boards_added),
+               'companies_found_in_news': len(growth.get('companies', [])),
+               'search_queries': found.get('queries', []) + growth.get('queries', []),
                'public_emails': sum(bool(r.get('Public Work Email')) for r in roles),
                'manager_profiles': sum(bool(r.get('Manager LinkedIn')) for r in roles),
                'investor_evidenced_companies': sum(bool(r.get('Investment Source')) for r in roles),
@@ -516,7 +631,11 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
              f'{summary["postings_seen"]} postings screened for QA titles; {len(focus)} current roles meet the stated minimum experience and geography focus.',
              'No compensation filter. Hyderabad onsite/hybrid and India-eligible remote remain the configured preferences. Singapore requires sponsorship review.',
              'Requirements starting at 4, 5 or 6 years are included; a 5-8-year range is shown exactly. Unstated requirements are a separate review queue.',
-             'Start with the Startup shortlist. New drafts require your approval. Confirmed sent messages are labeled separately and are not recreated. One draft per company avoids contacting several leaders about the same hire.',
+             'Start with New today: jobs first seen in this run. Other tabs list newest first. '
+             'Search terms come from profile.yaml and change daily; companies named in recent funding and growth news '
+             'are looked up and, when a public careers board exists, added to the permanent watch list. '
+             'Companies already contacted are left to follow-ups, and companies researched on a recent earlier day wait behind new ones.',
+             'The Startup shortlist has the outreach. New drafts require your approval. Confirmed sent messages are labeled separately and are not recreated. One draft per company avoids contacting several leaders about the same hire.',
              'Only outreach with a sourced recipient email becomes a Gmail draft. Outreach with missing contacts stays in Excel for research; historical addresses remain labeled and are not delivery-verified.',
              'The job search and Excel report finish first, then Gmail drafts are saved, then outputs are published to the same Drive folder.',
              'Source Coverage.csv records failures and zero-result boards. All Job Decisions.csv keeps all assessed rejection reasons. Discovery Leads.csv contains unverified external links.',
@@ -527,7 +646,8 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     evidence = {k: {'metadata': {f: v for f, v in m.items() if not f.startswith('_')},
                     'sources': m.get('_sources', []), 'errors': m.get('_errors', [])} for k, m in metadata.items()}
     atomic_json(out / 'Contact Research.json', evidence)
-    prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary)
+    prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary, state_dir=state_dir)
+    progress(summary['headline'])
     augment_manifest(out, ['All Job Decisions.csv', 'Discovery Leads.csv', 'Research Notes.md', 'Contact Research.json', 'Duplicate Listings.csv'])
     if cfg.get('gmail_drafts'):
         remaining(deadline)
@@ -557,7 +677,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
             except Exception as exc:
                 summary['issues'].append({'stage':'followups','error':type(exc).__name__})
                 summary['status'] = 'partial'
-        prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary)
+        prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary, state_dir=state_dir)
     return summary
 
 

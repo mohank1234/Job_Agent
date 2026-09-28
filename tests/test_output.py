@@ -135,6 +135,20 @@ def test_first_seen_date_persists_across_days(tmp_path):
     assert tabs_day2b["Ready to review"][0]["Date"] == "2026-01-05"
 
 
+def test_new_today_tab_holds_only_first_sightings_and_tabs_list_newest_first(tmp_path):
+    path = tmp_path / "first-seen.json"
+    old = good_row(**{"Rule Score": "95"})
+    output.partition([old], first_seen_path=path, today="2026-01-01")
+    new = good_row(**{"Job Link": "https://jobs.ashbyhq.com/example/2", "Rule Score": "50"})
+    excluded = good_row(**{"Job Link": "https://jobs.ashbyhq.com/example/3", "Fit Status": "out_of_scope"})
+    tabs = output.partition([old, new, excluded], first_seen_path=path, today="2026-01-05")
+    assert [r["Job Link"] for r in tabs["New today"]] == [new["Job Link"]]
+    # Newest first even though the older posting scores higher.
+    assert [r["Date"] for r in tabs["Ready to review"]] == ["2026-01-05", "2026-01-01"]
+    tabs = output.partition([old], first_seen_path=path, today="2026-01-06")
+    assert tabs["New today"] == []
+
+
 def test_no_new_today_banner_appears_and_disappears():
     old_tabs = output.partition([good_row()], today="2026-01-01")
     data = output.make_workbook(old_tabs, report_summary(), today="2026-01-05")

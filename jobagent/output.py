@@ -107,7 +107,7 @@ def partition(rows, *, first_seen_path=None, today=None):
     if first_seen_path is not None:
         first_seen_path = Path(first_seen_path)
         store = json.loads(first_seen_path.read_text(encoding="utf-8")) if first_seen_path.exists() else {}
-    tabs = {"Ready to review": [], "Fit needs checking": [], "Excluded jobs": [], "Failed checks": []}
+    tabs = {"New today": [], "Ready to review": [], "Fit needs checking": [], "Excluded jobs": [], "Failed checks": []}
     for original in rows:
         row = dict(original)
         key = canonical(row.get("Job Link", "")) if first_seen_path is not None else None
@@ -133,8 +133,12 @@ def partition(rows, *, first_seen_path=None, today=None):
         else:
             target = "Fit needs checking"
         tabs[target].append(row)
+        # A view of today's first sightings; the row also stays in its fit tab.
+        if target in ("Ready to review", "Fit needs checking") and row["Date"] == today:
+            tabs["New today"].append(row)
     for values in tabs.values():
         values.sort(key=lambda r: (-int(r.get("Rule Score") or 0), r.get("Company", ""), r.get("Job Title", "")))
+        values.sort(key=lambda r: r.get("Date", ""), reverse=True)
     if changed:
         atomic_json(first_seen_path, store)
     return tabs
@@ -237,7 +241,7 @@ def text_cell(value):
     return value
 
 
-NO_NEW_TODAY_SHEETS = {"Ready to review", "Fit needs checking"}
+NO_NEW_TODAY_SHEETS = {"New today", "Ready to review", "Fit needs checking"}
 
 
 def make_workbook(tabs, summary, *, extra_grids=None, today=None):
@@ -252,7 +256,8 @@ def make_workbook(tabs, summary, *, extra_grids=None, today=None):
         ["JobAgent Report", "Verified vacancies and source evidence"],
         ["Last checked (UTC)", summary["checked_at"]],
         ["Run status", summary["status"]],
-        ["How to use", "Start with Ready to review. Fit needs checking contains specific gaps to resolve."],
+        ["What changed today", summary.get("headline", "")],
+        ["How to use", "Start with New today (first seen in this run). Ready to review and Fit needs checking list newest first."],
         ["Refresh", "Generated report. Record actual applications in your tracker; edits here stop automatic replacement. A deleted optional tracker is not recreated."],
         ["Evidence", "Each current vacancy has a full JD, application link, source URL and verification time."],
         ["Fit", "Rules-based profile/JD comparison. A match does not confirm every requirement or employer eligibility."],

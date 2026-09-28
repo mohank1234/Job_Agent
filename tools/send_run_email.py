@@ -25,22 +25,24 @@ def load_json(path, default=None):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def ready_to_review_rows(xlsx_path, limit=15):
+def ready_to_review_rows(xlsx_path, limit=15, sheet="Ready to review"):
     from openpyxl import load_workbook
 
     path = Path(xlsx_path)
     if not path.exists():
         return []
     wb = load_workbook(path, read_only=True, data_only=True)
-    if "Ready to review" not in wb.sheetnames:
+    if sheet not in wb.sheetnames:
         return []
-    ws = wb["Ready to review"]
+    ws = wb[sheet]
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return []
     header = list(rows[0])
     idx = {name: i for i, name in enumerate(header)}
     out = []
+    # Skip the merged "Nothing new for today" notice row, which has no link.
+    rows = [rows[0], *[r for r in rows[1:] if "Job Link" not in idx or r[idx["Job Link"]]]]
     for row in rows[1:limit + 1]:
         out.append({
             "Company": row[idx["Company"]] if "Company" in idx else "",
@@ -54,8 +56,15 @@ def build_body(details, rows):
     summary = details.get("summary") or {}
     publication = details.get("publication") or {}
     counts = summary.get("counts") or {}
+    new = summary.get("whats_new") or {}
     lines = [
         f"Job Agent - daily run - {details.get('date_ist', '')}",
+        "",
+        summary.get("headline") or "",
+    ]
+    if "new_jobs" in new and not new["new_jobs"]:
+        lines.append("Nothing new today: every open job below was already in an earlier report.")
+    lines += [
         "",
         f"Vacancies checked: {summary.get('checked', 0)}",
         f"Ready to review: {counts.get('Ready to review', 0)}",
@@ -71,7 +80,7 @@ def build_body(details, rows):
             lines.append(f"  {count}  {status}")
         lines.append("")
     if rows:
-        lines.append("Ready to review:")
+        lines.append("New today:")
         for r in rows:
             lines.append(f"  {r['Company']} - {r['Job Title']}")
             lines.append(f"    {r['Job Link']}")
@@ -101,10 +110,11 @@ def main():
         print("drive_output.expected_account not configured; skipping notification email.")
         return 0
 
-    rows = ready_to_review_rows(ROOT / "research" / "report-latest" / "JobAgent Report.xlsx")
+    rows = ready_to_review_rows(ROOT / "research" / "report-latest" / "JobAgent Report.xlsx", sheet="New today")
     body = build_body(details, rows)
-    counts = (details.get("summary") or {}).get("counts") or {}
-    subject = f"Job Agent - {details.get('date_ist', '')} - {counts.get('Ready to review', 0)} ready to review"
+    new = (details.get("summary") or {}).get("whats_new") or {}
+    subject = (f"Job Agent - {details.get('date_ist', '')} - {new.get('new_jobs', 0)} new jobs, "
+               f"{new.get('new_companies', 0)} new companies")
 
     from jobagent.notify import send_self_email
     result = send_self_email(subject, body, expected_account)

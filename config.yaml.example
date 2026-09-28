@@ -21,8 +21,10 @@ profile_file: profile.yaml
 morning:
   workers: 6
   max_report_rows: 1000
-  max_company_research: 15
-  max_drafts: 25
+  # No cap on companies researched or drafts: every fresh company is handled
+  # while the 06:00-11:00 IST window allows, stopping this many minutes
+  # before 11:00 so the report is always written.
+  report_reserve_minutes: 20
   gmail_drafts: false  # Enable after Gmail compose consent for the expected account.
   signature_phone: ""  # Optional phone placed on the line after your name in email drafts.
   resume_attachment: ""  # Path to your PDF or DOCX resume; attached to each Gmail draft.
@@ -32,59 +34,57 @@ morning:
     - 'YC venture backed startup QA SDET 4 5 6 years India remote Hyderabad jobs'
     - 'site:jobs.ashbyhq.com QA automation engineer India remote 4 6 years'
     - 'site:jobs.lever.co OR site:job-boards.greenhouse.io SDET India remote startup 5 years'
+  # On top of the fixed searches above, each run builds new searches from
+  # profile.yaml (target roles, preferred cities, automation skills). They
+  # change every day, so the same questions are not asked twice in a row.
+  rotating_queries: 6          # daily job searches limited to Ashby/Lever/Greenhouse pages
+  growth_queries: 3            # daily funding / hiring-growth news searches
+  # board_lookup_searches: 5   # optional cap on web searches for careers boards the direct API check missed; unset = no cap
+  # A company researched on an earlier day waits this long before it is
+  # researched again, so new companies get the research budget first.
+  # Companies already contacted are left to the follow-up step.
+  research_cooldown_days: 14
   # Y Combinator's "Work at a Startup" board (1,000+ live postings) has no
   # public API of its own, unlike companies.yaml's board slugs. This calls a
   # paid Apify actor (nomad-agent/ycombinator-was-scraper) instead - real
   # money per run, capped server-side by max_total_charge_usd (Apify enforces
   # this itself; nothing here tracks "remaining budget" locally). Requires
-  # APIFY_API_KEY. Verified 2026-09-20: $0.0025/job on the free account tier,
-  # so max_total_charge_usd: 0.15 with max_items: 40 costs at most $0.10/run.
+  # APIFY_API_KEY. Verified 2026-09-20: $0.0025/job on the free account tier.
+  # Every matching posting is fetched (no item cap); the charge ceiling is set
+  # to cover the actor's full 1,000-item allowance ($2.50) and only stops a
+  # runaway run. A higher max_total_charge_usd here raises that ceiling.
   apify_yc:
     enabled: false
     queries: ["QA", "SDET", "quality engineer", "software test engineer", "test automation"]
-    max_items: 40
-    max_total_charge_usd: 0.15
+    # These terms plus the profile's target titles form a pool; each run uses
+    # a different slice of it, so the same postings are not returned daily.
+    queries_per_day: 5
 
 llm:
-  # PROVIDER. Researched and benchmarked 2026-08-20 for THIS workload
-  # (~10 calls/day, ~5-8k tokens per 4-job batch):
+  # PROVIDER. Default is a local Ollama model: no API key, no quota, nothing
+  # leaves the machine. Install Ollama, then `ollama pull gpt-oss:20b`.
   #
-  #   gemini  10 req/min | 250,000 tok/min | 500-1500 req/day  <- BEST, default
-  #   groq    30 req/min |   8,000 tok/min | 1000 req/day      <- throttles a batch
-  #   cerebras           | 8,192-token CONTEXT CAP             <- cannot fit 4 JDs
-  #   omnirate (free pool) 6-40 s/job, fails ~1 call in 3      <- was the default
+  # MEASURED 2026-09-27, RTX 5060 Laptop (8 GB VRAM) + 16 GB RAM:
+  #   gpt-oss:20b  ~18 tok/s (59% CPU / 41% GPU), valid schema JSON on 6-job
+  #                batches, ~1-1.5 min per batch - fits the 06:00-11:00 window.
+  # A model that fits entirely in VRAM (e.g. qwen3:8b) is roughly 3x faster.
   #
-  # Gemini wins on token headroom, has native JSON-schema output, and its free
-  # tier needs no card. Get a key in 60s: https://aistudio.google.com/apikey
-  # then:  setx GEMINI_API_KEY "your-key"   (reopen the terminal afterwards)
-  provider: gemini
+  # Hosted alternatives (gemini, groq, openrouter, omnirate) remain available
+  # but are no longer the default; add them to free_providers to allow them.
+  provider: ollama
+  model: gpt-oss:20b
+  base_url: http://localhost:11434   # or set OLLAMA_HOST
+  think: low                # gpt-oss: low|medium|high; other models: true/false
+  num_ctx: 16384            # context window; 4 JDs + profile fit comfortably
+  keep_alive: 30m           # keep the model loaded between batches
 
-  # MEASURED 2026-08-20 on real 6-job batches through this pipeline:
-  #   gemini-flash-lite-latest  0.6 s/job   6/6 scored
-  #   gemini-flash-latest       1.6 s/job   6/6 scored  <- primary
-  #   gemini-3-flash-preview    1.7 s/job   6/6 scored
-  #   gemma-4-31b-it            5.1 s/job   6/6 scored
-  #   (old OmniRoute free pool 6-43 s/job, failed 1 call in 3)
-  #
-  # flash-latest is a rolling alias, so it will not vanish the way a
-  # "-preview" id can - that matters for an unattended daily task. It also
-  # discriminated best below the scope cap (scores 32/36 where the others
-  # flattened everything to 40).
-  #
-  # NOTE: gemini-2.5-flash 404s on this key; do not use it.
-  model: gemini-flash-latest
-  api_key_env: GEMINI_API_KEY
+  # Tried in order if the primary errors. Models not installed are skipped.
+  fallback_models: []
 
-  # Tried in order if the primary errors or is rate-limited.
-  fallback_models:
-    - gemini-3-flash-preview
-    - gemini-flash-lite-latest
-
-  batch_size: 6            # Gemini's token headroom allows bigger batches
-  max_tokens: 30000        # Gemini spends tokens THINKING before it answers;
-                           # a small budget returns finish_reason=length and
-                           # zero output. This is the fix, not an extravagance.
-  timeout_seconds: 120
+  batch_size: 4             # smaller batches keep local-model JSON reliable
+  max_tokens: 8000
+  timeout_seconds: 900      # local generation is slow; don't abandon it early
+  research_timeout_seconds: 600
   retries: 2               # per batch, with exponential backoff
   backoff_seconds: 4
   max_jobs_per_run: 60
@@ -94,13 +94,9 @@ llm:
   # alone, so this layer is an enhancement, not the engine.
   llm_weight: 0.75
 
-  # Cost guard. Gemini and Groq free tiers are genuinely free, but their model
-  # ids do not contain the word "free", so the old name-based check cannot
-  # apply. Providers on this list are trusted as free-tier.
+  # Cost guard: only providers on this list may be used.
   free_models_only: true
-  free_providers: [gemini, groq, omnirate]
-
-  effort: high             # anthropic provider only; ignored by the others
+  free_providers: [ollama, omnirate]
 
 retention:
   # RETENTION IS NON-DESTRUCTIVE BY DESIGN.

@@ -23,7 +23,9 @@ from ._errors import AdapterError, classify_http_error
 
 ACTOR_ID = "1JDUBKElJkIKoCkgG"  # nomad-agent/ycombinator-was-scraper
 APIFY_URL = f"https://api.apify.com/v2/acts/{ACTOR_ID}/run-sync-get-dataset-items"
-TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+# A full (uncapped) result set takes longer than a 40-item page; Apify holds
+# a synchronous run open for up to 300 seconds.
+TIMEOUT = httpx.Timeout(310.0, connect=10.0)
 
 ApifyError = AdapterError
 

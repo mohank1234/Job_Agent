@@ -4,7 +4,8 @@
       "Bash(python -c ' *)",
       "Bash(timeout 30 python -c ' *)",
       "Bash(timeout 20 python -c ' *)",
-      "Bash(timeout 25 python -c ' *)"
+      "Bash(timeout 25 python -c ' *)",
+      "Bash(gh run *)"
     ]
   }
 }

@@ -1,13 +1,14 @@
 """Provider abstraction — the rest of the codebase never imports an SDK directly.
 
-Three backends:
-  anthropic   — the Anthropic SDK, native structured outputs
+Backends:
+  ollama      — local Ollama server (default); native JSON-schema constrained output
   openrouter  — the OpenAI-compatible SDK against openrouter.ai, 400+ models
   omnirate    — local OmniRoute gateway (OpenAI-compatible, free models)
+  gemini/groq — hosted free tiers, kept as optional fallbacks
 
-They speak different wire formats (Anthropic uses `output_config.format`,
-OpenRouter/OmniRoute use OpenAI's `response_format.json_schema`), so all are
-wrapped behind `structured()` / `text()` and selected from config.
+They speak different wire formats (Ollama uses `format`, the others use
+OpenAI's `response_format.json_schema`), so all are wrapped behind
+`structured()` / `text()` and selected from config.
 """
 
 from __future__ import annotations
@@ -52,60 +53,103 @@ def _extract_json(text: str) -> dict:
     raise ProviderError(f"no JSON object in response: {text[:200]}")
 
 
-# ---------------------------------------------------------------- Anthropic
+# ------------------------------------------------------------------- Ollama
 
-class AnthropicProvider:
-    name = "anthropic"
+OLLAMA_BASE = "http://localhost:11434"
+
+
+class OllamaProvider:
+    """Local Ollama server - no API key, no network egress, no per-token cost.
+
+    Uses Ollama's native /api/chat rather than its OpenAI shim because the
+    native `format` field takes a full JSON schema and constrains decoding to
+    it, which is what makes an 8-20B local model reliable for batch scoring.
+    """
+
+    name = "ollama"
 
     def __init__(self, cfg: dict):
-        import anthropic
+        import httpx
 
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        self.base_url = (cfg.get("base_url") or os.environ.get("OLLAMA_HOST")
+                         or OLLAMA_BASE).rstrip("/")
+        if not self.base_url.startswith("http"):
+            self.base_url = f"http://{self.base_url}"
+        self.model = cfg.get("model") or "gpt-oss:20b"
+        self.fallback_models = [
+            m for m in (cfg.get("fallback_models") or []) if m and m != self.model
+        ]
+        self.max_tokens = int(cfg.get("max_tokens", 8000))
+        self.num_ctx = int(cfg.get("num_ctx", 16384))
+        # gpt-oss takes "low" | "medium" | "high"; other thinking models take a
+        # bool. None leaves the model's default alone.
+        self.think = cfg.get("think", "low")
+        self.keep_alive = cfg.get("keep_alive", "30m")
+        # Local models are slow to load and to generate on a laptop GPU; the
+        # short cloud timeouts would abandon calls that are about to succeed.
+        self.client = httpx.Client(timeout=float(cfg.get("timeout_seconds", 900)))
+        self.last_model_used = self.model
+        try:
+            tags = self.client.get(f"{self.base_url}/api/tags", timeout=10).json()
+        except Exception as exc:
             raise ProviderError(
-                "ANTHROPIC_API_KEY is not set. Either set it, or switch "
-                "config.yaml -> llm.provider to 'openrouter'."
+                f"Ollama is not reachable at {self.base_url} ({type(exc).__name__}). "
+                "Start it with `ollama serve` or open the Ollama app."
             )
-        self.client = anthropic.Anthropic()
-        self.model = cfg.get("model", "claude-opus-5")
-        self.effort = cfg.get("effort", "high")
+        installed = {m.get("name") for m in tags.get("models", [])}
+        missing = [m for m in [self.model, *self.fallback_models]
+                   if m not in installed and f"{m}:latest" not in installed]
+        if self.model in missing:
+            raise ProviderError(
+                f"Ollama model '{self.model}' is not installed. Run `ollama pull {self.model}`."
+            )
+        self.fallback_models = [m for m in self.fallback_models if m not in missing]
+
+    def _chat(self, system: str, prompt: str, max_tokens: int, schema: dict | None = None):
+        errors: list[str] = []
+        for model in [self.model, *self.fallback_models]:
+            body = {
+                "model": model,
+                "stream": False,
+                "keep_alive": self.keep_alive,
+                "options": {"num_ctx": self.num_ctx,
+                            "num_predict": min(max_tokens, self.max_tokens)},
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            if self.think is not None:
+                body["think"] = self.think
+            if schema:
+                body["format"] = schema
+            try:
+                resp = self.client.post(f"{self.base_url}/api/chat", json=body)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:
+                errors.append(f"{model}: {type(exc).__name__}: {str(exc)[:120]}")
+                continue
+            if data.get("error"):
+                errors.append(f"{model}: {str(data['error'])[:120]}")
+                continue
+            self.last_model_used = model
+            return (data.get("message") or {}).get("content") or ""
+        raise ProviderError("ollama: " + " | ".join(errors[:3]))
 
     def structured(self, system: str, prompt: str, model_cls: Type[T]) -> T:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=16000,
-            system=system,
-            output_config={
-                "effort": self.effort,
-                "format": {
-                    "type": "json_schema",
-                    "schema": model_cls.model_json_schema(),
-                },
-            },
-            messages=[{"role": "user", "content": prompt}],
-        )
-        if response.stop_reason == "refusal":
-            raise ProviderError(f"model declined: {response.stop_details}")
-        text = next((b.text for b in response.content if b.type == "text"), "")
+        schema = model_cls.model_json_schema()
+        text = self._chat(system, prompt, self.max_tokens, schema=schema)
         return model_cls.model_validate(_extract_json(text))
 
     def text(self, system: str, prompt: str, max_tokens: int = 2000) -> str:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        if response.stop_reason == "refusal":
-            return "(model declined)"
-        return next((b.text for b in response.content if b.type == "text"), "").strip()
+        return self._chat(system, prompt, max_tokens).strip()
 
 
 # --------------------------------------------------------------- OpenRouter
 
 class OpenRouterProvider:
-    """OpenAI-compatible. Note OpenRouter bills Claude models at the same
-    per-token rate as Anthropic direct — the saving comes from picking a
-    cheaper model, not from the proxy itself."""
+    """OpenAI-compatible hosted router. Optional; not used by default."""
 
     name = "openrouter"
 
@@ -119,7 +163,7 @@ class OpenRouterProvider:
                 "https://openrouter.ai/keys (format: sk-or-v1-...)"
             )
         self.client = OpenAI(base_url=OPENROUTER_BASE, api_key=key)
-        self.model = cfg.get("model") or "anthropic/claude-sonnet-5"
+        self.model = cfg.get("model") or "openai/gpt-oss-120b:free"
         self.headers = {
             "HTTP-Referer": "https://github.com/local/job-agent",
             "X-Title": "job-agent",
@@ -409,19 +453,19 @@ class GroqProvider(GeminiProvider):
 PROVIDERS = {
     "gemini": GeminiProvider,
     "groq": GroqProvider,
-    "anthropic": AnthropicProvider,
+    "ollama": OllamaProvider,
     "openrouter": OpenRouterProvider,
     "omnirate": OmniRouteProvider,
 }
 
 
 def make_provider(cfg: dict):
-    name = (cfg.get("provider") or "anthropic").lower()
+    name = (cfg.get("provider") or "ollama").lower()
     # Cost guard: a provider must be on the trusted free list, unless the user
     # deliberately turns the guard off. This is what stops a stray config edit
     # pointing the pipeline at a billed endpoint.
     if bool(cfg.get("free_models_only", True)):
-        free_providers = cfg.get("free_providers") or ["omnirate"]
+        free_providers = cfg.get("free_providers") or ["ollama", "omnirate"]
         if name not in free_providers:
             raise ProviderError(
                 f"provider '{name}' is not in llm.free_providers "

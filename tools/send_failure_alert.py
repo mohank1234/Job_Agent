@@ -23,6 +23,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
+def _log_tail(lines=60):
+    """The run log's last lines, so the cause is readable from the email alone
+    (the run page may be unreachable, e.g. on a network that blocks GitHub)."""
+    for name in (os.environ.get("JOBAGENT_RUN_LOG", ""), "morning-run.log",
+                 "logs/report-refresh.log"):
+        path = ROOT / name if name else None
+        if path and path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            return "\n".join(text[-lines:])
+    return ""
+
+
 def main():
     run_url = os.environ.get("GITHUB_RUN_URL", "")
     try:
@@ -38,6 +50,9 @@ def main():
             f"Run details: {run_url or '(run URL unavailable)'}\n\n"
             "Nothing was published or sent for today until this is fixed."
         )
+        tail = _log_tail()
+        if tail:
+            body += "\n\nLast lines of the run log:\n\n" + tail
         from jobagent.notify import send_self_email
         result = send_self_email(subject, body, expected_account)
         print(f"Failure alert email sent: {result['message_id']}")

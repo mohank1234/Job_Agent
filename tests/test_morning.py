@@ -190,9 +190,11 @@ def test_daily_work_exports_full_jd_decisions_and_drafts(tmp_path, monkeypatch):
     record = {'Company':'example','Vendor':'ashby','Board URL':'https://jobs.ashbyhq.com/example',
               'Status':'Fetched','Checked At':now_iso(),'Postings':1,'QA titles':1,
               'Source URL':'https://api.ashbyhq.com/posting-api/job-board/example','jobs':[morning._job_dict(job)]}
+    from jobagent.enrich import exa
     monkeypatch.setattr(morning, 'ROOT', project)
     monkeypatch.setattr(morning, 'collect_boards', lambda *a, **k: [record])
     monkeypatch.setattr(llm, 'make_provider', lambda cfg: None)
+    monkeypatch.setattr(exa, 'exa_search', lambda *a, **k: [])
     monkeypatch.setattr(daily_research, 'research_company', lambda *a, **k: {'Research Checked At':now_iso()})
     profile = load_profile(Path(__file__).resolve().parents[1]/'profile.yaml.example')
     profile.raw['identity']['experience']['years'] = 5
@@ -217,6 +219,65 @@ def test_daily_work_exports_full_jd_decisions_and_drafts(tmp_path, monkeypatch):
     assert len(rows[0]['LinkedIn Note']) <= 300
     assert (out/'All Job Decisions.csv').is_file()
     assert (out/'JobAgent Report.xlsx').stat().st_size > 1000
+
+
+def test_daily_work_moves_on_to_fresh_companies_and_reports_what_is_new(tmp_path, monkeypatch):
+    import dataclasses
+    import hashlib
+    import json
+    from jobagent import discovery, llm
+    from jobagent.enrich import exa
+    from jobagent.outreach import daily_research
+    from jobagent.runtime import now_iso
+    project = tmp_path/'project'
+    (project/'resume').mkdir(parents=True)
+    (project/'companies.yaml').write_text('ashby: [alpha, beta]\n', encoding='utf-8')
+    (project/'resume'/'resume_data.py').write_text("NAME='Candidate'\nSUMMARY='QA'\nEXPERIENCE=[{'bullets':['Built Selenium tests.']}]\n", encoding='utf-8')
+    # alpha already has a draft/sent email; beta has never been contacted.
+    alpha_key = hashlib.sha256(b'alpha').hexdigest()[:24]
+    (project/'gmail_report_drafts.json').write_text(json.dumps({alpha_key: {'state': 'sent'}}), encoding='utf-8')
+    records = []
+    for company in ('alpha', 'beta'):
+        job = dataclasses.replace(posting(), company=company, url=f'https://jobs.ashbyhq.com/{company}/1')
+        job.description += ' Qualifications: 5 years of QA experience.'
+        records.append({'Company':company,'Vendor':'ashby','Board URL':f'https://jobs.ashbyhq.com/{company}',
+                        'Status':'Fetched','Checked At':now_iso(),'Postings':1,'QA titles':1,
+                        'Source URL':f'https://api.ashbyhq.com/posting-api/job-board/{company}','jobs':[morning._job_dict(job)]})
+    news = [{'url':'https://news.example/funding','title':'Gamma Robotics raises seed round','snippet':'Gamma Robotics raised $5M.'}]
+    searches = []
+    def search(query, *a, **k):
+        searches.append((query, k.get('include_domains')))
+        return news if 'include_domains' not in k else []
+    class Provider:
+        def structured(self, system, prompt, model):
+            return model(companies=[{'name':'Gamma Robotics','evidence':'Gamma Robotics raised'},
+                                    {'name':'Invented Labs','evidence':'not in the source'}])
+    researched = []
+    monkeypatch.setattr(morning, 'ROOT', project)
+    monkeypatch.setattr(morning, 'collect_boards', lambda directory, *a, **k: records)
+    monkeypatch.setattr(llm, 'make_provider', lambda cfg: Provider())
+    monkeypatch.setattr(exa, 'exa_search', search)
+    monkeypatch.setattr(discovery, 'probe_board', lambda name, client: 'https://jobs.ashbyhq.com/gamma' if name == 'Gamma Robotics' else None)
+    monkeypatch.setattr(daily_research, 'research_company',
+                        lambda row, *a, **k: researched.append(row['Company']) or {'Research Checked At':now_iso()})
+    profile = load_profile(Path(__file__).resolve().parents[1]/'profile.yaml.example')
+    profile.raw['identity']['experience']['years'] = 5
+    out, state = project/'out', project/'state'
+    (state/'2026-09-28').mkdir(parents=True)
+    summary = morning.daily_work({'morning':{}}, profile, out, state/'2026-09-28', progress=lambda *a:None)
+    assert researched == ['beta']
+    rows = [r['Company'] for r in __import__('csv').DictReader((out/'Startup Outreach.csv').open(encoding='utf-8-sig'))]
+    assert rows == ['beta']
+    growth = json.loads((state/'2026-09-28'/'new-companies.json').read_text(encoding='utf-8'))
+    assert growth['companies'] == ['Gamma Robotics'] and growth['boards'] == ['https://jobs.ashbyhq.com/gamma']
+    assert 'https://jobs.ashbyhq.com/gamma' in json.loads((state/'discovered-boards.json').read_text(encoding='utf-8'))
+    assert any(domains == discovery.ATS_DOMAINS for _, domains in searches)
+    assert summary['whats_new']['new_jobs'] == 2 and summary['whats_new']['still_open'] == 0
+    assert summary['whats_new']['new_companies'] == 2
+    assert summary['headline'].startswith('2 new jobs, 2 new companies')
+    assert json.loads((state/'company-history.json').read_text(encoding='utf-8'))['beta']['researched']
+    # Nothing is written to the real project state by a test run.
+    assert (state/'first-seen.json').is_file()
 
 
 @pytest.mark.parametrize('role,number,phrase',[
