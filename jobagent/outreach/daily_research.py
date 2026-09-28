@@ -21,7 +21,7 @@ from jobagent.outreach.service import recent
 from jobagent.outreach.verification import canonical, get_public
 from jobagent.models import clean_html
 
-STYLE_VERSION = 7
+STYLE_VERSION = 8
 EMAIL = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])", re.I)
 BROKERS = ('rocketreach', 'apollo.io', 'contactout', 'signalhire', 'leadiq', 'zoominfo', 'lusha', 'wiza.co')
 META = ['Startup Priority', 'Investor Backing', 'YC Batch', 'Investment Source',
@@ -228,66 +228,89 @@ def research_company(row, cache_dir, provider, *, seed=None, deadline=None, sear
     return data
 
 
-def brief_experience(row, facts):
-    """A short introduction using only skills present in the candidate's resume."""
-    resume = (facts.get('summary', '') + ' ' + ' '.join(facts['bullets'])).lower()
-    jd = row['JD Text'].lower()
-    skills = []
-    if re.search(r'\b(?:agent|agents|llm)\b', jd) and 'agent' in resume and 'evaluat' in resume:
-        skills.append('AI agent evaluation')
-    if 'computer vision' in jd and 'computer vision' in resume:
-        skills.append('computer vision testing')
-    if 'selenium' in resume:
-        skills.append('Selenium automation')
-    if re.search(r'\bapi\b', resume):
-        skills.append('API testing')
-    skills = skills[:2]
-    years = re.search(r'\bwith\s+(\d+(?:\.\d+)?)\s+years?\s+of\s+experience', facts.get('summary', ''), re.I)
-    lead = f'I have {years[1]} years of QA experience' if years else 'My QA experience includes'
-    if skills:
-        return lead + (', including ' if years else ' ') + ' and '.join(skills) + '.'
-    return ('I have ' + years[1] + ' years of QA experience.' if years else 'I work in software quality assurance.')
+def jd_skills(row, facts, limit=4):
+    """Skills the job description names that the resume also contains, as the
+    resume writes them; never a skill the resume lacks."""
+    if facts.get('resume'):
+        from jobagent.outreach.tailored_resume import ats_match
+        matched = ats_match(row.get('JD Text', ''), facts['resume'])['matched'][:limit]
+    else:
+        matched = []
+    if len(matched) <= 1:
+        return ''.join(matched)
+    return ', '.join(matched[:-1]) + ' and ' + matched[-1]
 
 
-def recipient_template(row, metadata, facts, company):
-    """Use the user's advertised-opening templates, matched to the email contact."""
+def evidence_sentence(bullet):
+    """One resume bullet as a sentence: "Built X." -> "For example, I built X." """
+    bullet = (bullet or '').strip().rstrip('.')
+    if not bullet:
+        return ''
+    if len(bullet) > 1 and bullet[0].isupper() and bullet[1].islower():
+        bullet = bullet[0].lower() + bullet[1:]
+    return f'For example, I {bullet}.'
+
+
+def recipient_template(row, metadata, facts, company, evidence=''):
+    """Greeting, a well-wishing line, two paragraphs and a sign-off, pitched
+    to who is reading: a CTO gets technical fit, a founder/CEO the direct
+    outreach version, a recruiter a plain application."""
     title = row['Job Title'].strip()
-    contact = metadata.get('Email Contact Name') or metadata.get('Manager Name') or f'{company} team'
-    name = contact.split()[0] if metadata.get('Email Contact Name') or metadata.get('Manager Name') else contact
+    contact = metadata.get('Email Contact Name') or metadata.get('Manager Name') or ''
+    name = contact.split()[0] if contact else f'{company} team'
     role = (metadata.get('Email Contact Role') if metadata.get('Email Contact Name') else metadata.get('Manager Role')) or ''
     attached = facts.get('resume_attached', False)
-    experience = brief_experience(row, facts)
-    hope = "Hope you're doing well."
-    if re.search(r'\b(?:ceo|chief executive|founder|co-founder)\b', role, re.I):
-        template = '1 - CEO, existing opening'
+    years = re.search(r'\bwith\s+(\d+(?:\.\d+)?)\s+years?\s+of\s+experience', facts.get('summary', ''), re.I)
+    me = f'a QA engineer with {years[1]} years of experience' if years else 'a QA engineer'
+    skills = jd_skills(row, facts)
+    example = evidence_sentence(evidence)
+    if re.search(r'\bcto\b|chief technology', role, re.I):
+        template, signoff = '4 - CTO, technical fit', 'Regards'
+        subject = f'{title} role at {company}'
+        p1 = f"I'm reaching out about the {title} role at {company}. I'm {me}" + (
+            f', and my work matches what the role asks for: {skills}.' if skills else '.')
+        ask = ("I've attached a resume tailored to this role. Would you be open to a short conversation, "
+               "or pointing me to the right person on your team?") if attached else (
+               "Would you be open to a short conversation? I'd be happy to share my resume.")
+    elif re.search(r'\b(?:ceo|chief executive|founder|co-founder)\b', role, re.I):
+        template, signoff = '1 - Founder or CEO, direct outreach', 'Best regards'
         subject = f'Interested in the {title} opening at {company}'
-        intro = f'I noticed the {title} opening at {company}. {experience}'
-        ask = 'Would you be open to sharing my attached resume with the person handling this role?' if attached else 'Would you be open to connecting me with the person handling this role? I would be happy to share my resume.'
-    elif re.search(r'\b(?:qa|quality)\b', role, re.I) and re.search(r'manager|head|director|lead', role, re.I):
-        template = '5 - QA manager, relevant experience'
-        subject = f'Interested in joining your QA team at {company}'
-        intro = f"I'm interested in the {title} role at {company}. {experience}"
-        ask = 'Would you be open to reviewing my attached resume?' if attached else 'Would you be open to reviewing my resume? I would be happy to share it.'
+        p1 = (f'I came across the {title} opening at {company} and wanted to reach out to you directly. '
+              f"I'm {me}" + (f', with hands-on work in {skills}.' if skills else '.'))
+        ask = (f"I'd love to help {company} keep its releases reliable as the team grows. I've attached my resume "
+               "for this role; would you be open to passing it to the hiring manager, or to a quick chat?") if attached else (
+               f"I'd love to help {company} keep its releases reliable as the team grows. Would you be open to a quick chat? "
+               "I'd be happy to share my resume.")
     elif re.search(r'\b(?:vp|vice president|director)\b', role, re.I):
-        template = '8 - Director or VP, advertised role'
+        template, signoff = '8 - Director or VP, advertised role', 'Best regards'
         subject = f'Interest in {title} at {company}'
         job_id = str(row.get('Job ID') or '')
         if re.fullmatch(r'[A-Za-z0-9_-]{1,80}', job_id):
             subject += ' - ' + job_id
-        intro = f'I came across the {title} opening at {company}. {experience}'
-        ask = 'Would you be open to passing my attached resume to the hiring manager?' if attached else 'Could you connect me with the hiring manager? I would be happy to share my resume.'
-    elif re.search(r'recruit|talent|hiring manager|engineering manager', role, re.I):
-        template = '3 - Hiring contact, direct application'
+        p1 = f"I came across the {title} opening at {company}. I'm {me}" + (f', working with {skills}.' if skills else '.')
+        ask = ("Would you be open to passing my attached resume, tailored to this role, to the hiring manager?" if attached
+               else "Could you connect me with the hiring manager? I'd be happy to share my resume.")
+    elif re.search(r'\b(?:qa|quality)\b', role, re.I) and re.search(r'manager|head|lead', role, re.I):
+        template, signoff = '5 - QA manager, relevant experience', 'Regards'
+        subject = f'Interested in joining your QA team at {company}'
+        p1 = f"I'm interested in joining your QA team as {title}. I'm {me}" + (f', working with {skills}.' if skills else '.')
+        ask = ("I've attached a resume tailored to this role and would welcome the chance to discuss it." if attached
+               else "I'd be happy to share my resume and discuss the role.")
+    elif re.search(r'recruit|talent|hiring', role, re.I):
+        template, signoff = '3 - Recruiter, direct application', 'Thanks & regards'
         subject = f'Application for {title} - {facts["name"]}'
-        hope = "Hope you're having a good week."
-        intro = f'I saw the {title} opening at {company}. {experience}'
-        ask = "I've attached my resume and would appreciate a chance to discuss the role." if attached else 'I would be happy to share my resume and discuss the role.'
+        p1 = f"I'd like to be considered for the {title} role at {company}. I'm {me}" + (
+            f', with experience in {skills}.' if skills else '.')
+        ask = ("My resume, tailored to this role, is attached. I'd be glad to discuss next steps." if attached
+               else "I'd be happy to share my resume and discuss next steps.")
     else:
-        template = '4 - Technical leader, asking about an opening'
+        template, signoff = '6 - Engineering leader or team, advertised role', 'Regards'
         subject = f'QA opening on your team at {company}'
-        intro = f'I noticed {company} is hiring for {title}. {experience}'
-        ask = "Is this opening on your team? I've attached my resume and would appreciate being connected with the right person." if attached else 'Is this opening on your team? I would be happy to share my resume and would appreciate being connected with the right person.'
-    body = f'Hi {name},\n{hope}\n\n{intro}\n\n{ask}\n\nThanks & regards,\n{facts["name"]}'
+        p1 = f"I noticed {company} is hiring for {title}. I'm {me}" + (f', working with {skills}.' if skills else '.')
+        ask = ("I've attached a resume tailored to this role and would appreciate being connected with the right person."
+               if attached else "I'd be happy to share my resume and would appreciate being connected with the right person.")
+    p2 = f'{example} {ask}'.strip()
+    body = f"Hi {name},\n\nI hope you're doing well.\n\n{p1}\n\n{p2}\n\n{signoff},\n{facts['name']}"
     if facts.get('phone'):
         body += '\n' + str(facts['phone']).strip()
     return subject, body, template
@@ -322,7 +345,7 @@ def grounded_draft(row, metadata, facts):
     tasks = [s for s in sentences if 35 <= len(s) <= 185 and re.search(r'\b(build|design|own|develop|test|evaluate|implement|automate|maintain)\b', s, re.I)
              and not re.search(r'applicant|race|religion|veteran|equal opportunity|disability|compensation|benefits', s, re.I)]
     task = max(tasks, key=score) if tasks else ''
-    subject, body, template = recipient_template(row, metadata, facts, company)
+    subject, body, template = recipient_template(row, metadata, facts, company, evidence=bullets[0])
     relevant = [s for s in ('API testing', 'Selenium', 'SQL', 'Jenkins', 'Docker', 'LLM evaluation', 'computer vision testing')
                 if set(s.lower().split()) & tokens and s.split()[0].lower() in ' '.join(bullets).lower()]
     evidence = ', '.join(relevant[:2]) or 'QA automation and API testing'

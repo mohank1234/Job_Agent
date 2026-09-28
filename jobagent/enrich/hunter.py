@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,9 +57,19 @@ def account_searches_left(key, get=httpx.get):
 
 
 def _spend_check(usage_path, monthly_limit, key, get):
+    import calendar
+    import math
     usage = _usage(usage_path)
+    now = datetime.now(timezone.utc)
+    if usage.get("day") != now.strftime("%Y-%m-%d"):
+        usage.update(day=now.strftime("%Y-%m-%d"), before_today=usage["searches"])
     if usage["searches"] >= monthly_limit:
         raise HunterError("free_limit_reached", f"Hunter free searches used for {usage['month']}")
+    # Spread the month's free credits over the days left, best companies first each day.
+    days_left = calendar.monthrange(now.year, now.month)[1] - now.day + 1
+    allowance = math.ceil((monthly_limit - usage["before_today"]) / days_left)
+    if usage["searches"] - usage["before_today"] >= allowance:
+        raise HunterError("free_limit_reached", f"Hunter allowance for today ({allowance}) used")
     left = account_searches_left(key, get)
     if left is not None and left <= 0:
         raise HunterError("free_limit_reached", "Hunter reports no searches left this month")
@@ -69,6 +80,34 @@ def _count(usage_path, usage):
     usage["searches"] += 1
     Path(usage_path).parent.mkdir(parents=True, exist_ok=True)
     Path(usage_path).write_text(json.dumps(usage), encoding="utf-8")
+
+
+def company_size(domain, usage_path, monthly_limit=50, get=httpx.get):
+    """(low, high) employees from Hunter Company Enrichment ("11-50" or a count),
+    or None. Counted as one credit whenever Hunter returns the company."""
+    key = api_key()
+    usage = _spend_check(usage_path, monthly_limit, key, get)
+    try:
+        resp = get(f"{API}/companies/find", params={"domain": domain, "api_key": key}, timeout=TIMEOUT)
+        if resp.status_code == 429:
+            raise HunterError("free_limit_reached", "Hunter usage limit reached")
+        if resp.status_code >= 400:
+            return None
+        data = resp.json().get("data") or {}
+    except HunterError:
+        raise
+    except Exception:
+        return None
+    if data:
+        _count(usage_path, usage)
+    metrics = data.get("metrics") or {}
+    count = metrics.get("employeesCount")
+    if isinstance(count, (int, float)) and count > 0:
+        return int(count), int(count)
+    band = re.fullmatch(r"\s*([\d,]+)\s*[-–]\s*([\d,]+)\s*", str(metrics.get("employees") or ""))
+    if band:
+        return int(band.group(1).replace(",", "")), int(band.group(2).replace(",", ""))
+    return None
 
 
 def executives(company, domain, usage_path, monthly_limit=50, get=httpx.get):

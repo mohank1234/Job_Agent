@@ -90,7 +90,6 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
     if not expected_sender:
         raise ValueError('Expected Gmail account is required')
     resume_data, resume_meta = load_resume(resume_path) if resume_path else (None, None)
-    attachments = [resume_meta] if resume_meta else []
     if service is None:
         from googleapiclient.discovery import build
         creds = authenticate(required_scopes=['https://www.googleapis.com/auth/gmail.compose'])
@@ -141,7 +140,12 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 raise ValueError('Invalid draft subject')
             # Draft prefilling does not confirm current ownership or authorize sending.
             to = draft_recipient(row)
-            desired_hash = content_hash(subject,body,to,attachments)
+            # The resume tailored to this job description when one was built,
+            # otherwise the configured resume.
+            row_data, row_meta = resume_data, resume_meta
+            if row.get('Resume File') and (out / row['Resume File']).is_file():
+                row_data, row_meta = load_resume(out / row['Resume File'])
+            desired_hash = content_hash(subject,body,to,[row_meta] if row_meta else [])
             entry = ledger.get(key,{})
             result = {'Company':row['Company'],'Job Link':row['Job Link'],'Status':'',
                       'Gmail Draft URL':'','Recipient':to or 'Public email not available; To left blank',
@@ -164,7 +168,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 result.update(Status='Pending contact research; saved in Excel only', Recipient='')
                 results.append(result)
                 continue
-            if not resume_meta and re.search(r'\b(?:attached\s+(?:my\s+)?resume|resume\s+is\s+attached)\b', body, re.I):
+            if not row_meta and re.search(r'\b(?:attached\s+(?:my\s+)?resume|resume\s+is\s+attached)\b', body, re.I):
                 result['Status'] = 'Withheld: email mentions an attachment but no resume is configured'
                 results.append(result)
                 continue
@@ -198,9 +202,9 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 if to:
                     message['To'] = to
                 message.set_content(body)
-                if resume_meta:
-                    maintype, subtype = resume_meta['mime_type'].split('/', 1)
-                    message.add_attachment(resume_data, maintype=maintype, subtype=subtype, filename=resume_meta['filename'])
+                if row_meta:
+                    maintype, subtype = row_meta['mime_type'].split('/', 1)
+                    message.add_attachment(row_data, maintype=maintype, subtype=subtype, filename=row_meta['filename'])
                 payload = {'message':{'raw':base64.urlsafe_b64encode(message.as_bytes()).decode()}}
                 updating = result['Status'] == 'Update needed'
                 if entry.get('draft_id') and not updating:

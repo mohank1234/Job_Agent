@@ -352,8 +352,9 @@ def prepare_report(out, rows, coverage, research, summary, *, state_dir=STATE):
     draft_state = read_json(out / 'Gmail Draft Status.json', {}).get('drafts', [])
     states = {canonical(d['Job Link']): d for d in draft_state if d.get('Job Link')}
     email_headers = ['Company', 'Job Title', 'To', 'Email Contact', 'Gmail Status', 'Gmail Drafts',
-                     'Subject', 'Email Draft', 'LinkedIn Note', 'Manager LinkedIn', 'Email Source',
-                     'Recipient Evidence', 'Approval', 'Job Link', 'Resume Attachment']
+                     'Subject', 'Email Draft', 'ATS Match', 'ATS Missing Keywords', 'LinkedIn Note',
+                     'Manager LinkedIn', 'Email Source', 'Recipient Evidence', 'Approval', 'Job Link',
+                     'Resume Attachment']
     email_rows = []
     from jobagent.outreach.report_drafts import draft_recipient
     for row in shortlist:
@@ -363,7 +364,7 @@ def prepare_report(out, rows, coverage, research, summary, *, state_dir=STATE):
                            row.get('Email Contact Name') or row.get('Manager Name', ''),
                            state.get('Status') or ('Awaiting Gmail draft creation' if recipient else 'Pending contact research; Excel only'),
                            state.get('Gmail Draft URL', ''), row.get('Cold Email Subject', ''), row.get('Cold Email', ''),
-                           row.get('LinkedIn Note', ''), row.get('Manager LinkedIn', ''), row.get('Email Source', ''),
+                           row.get('ATS Match', ''), row.get('ATS Missing Keywords', ''), row.get('LinkedIn Note', ''), row.get('Manager LinkedIn', ''), row.get('Email Source', ''),
                            row.get('Email Evidence', ''), state.get('Approval') or 'Pending user approval; unsent', row['Job Link'],
                            state.get('Resume Attachment', '')])
     linkedin_headers = ['Name', 'Company', 'JD', 'Source', 'LinkedIn ID', 'LinkedIn Link',
@@ -569,7 +570,15 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     if resume_path:
         from jobagent.outreach.report_drafts import load_resume
         load_resume(resume_path)
-    facts['resume_attached'] = bool(resume_path)
+    # Each outreach email gets a PDF resume tailored to its job description
+    # (reordered and emphasised, never added to); the configured file is the
+    # fallback when the resume data cannot be read.
+    from jobagent.outreach import tailored_resume
+    try:
+        facts['resume'] = tailored_resume.load_resume_data(ROOT / 'resume' / 'resume_data.py')
+    except Exception as exc:
+        issues.append({'stage': 'tailored_resume', 'error': type(exc).__name__})
+    facts['resume_attached'] = bool(resume_path or facts.get('resume'))
     metadata = {}
     # Fresh companies first: a company already contacted is left to the
     # follow-up step, and one researched on a recent earlier day waits until
@@ -678,14 +687,19 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         else:
             finder = None
         recheck = discovery.recent_cutoff(today, email_cfg.get('recheck_days', 30))
+        # "No email found" is retried sooner: startups add people and Hunter adds data.
+        recheck_empty = discovery.recent_cutoff(today, email_cfg.get('recheck_empty_days', 7))
         tally = {'looked_up': 0, 'verified': 0, 'size_unknown': set(), 'outside_size': set()}
+        hunter_usage = state_dir / 'hunter-usage.json'
         for row in focus:
             key, ck = row['Company'].casefold(), company_key(row['Company'])
             meta = metadata.get(key)
             if meta is None or meta.get('Public Work Email') or contacted(row):
                 continue
             yc = row.get('Listing Type', '').startswith('Y Combinator')
-            if not (size_rank(row) == 0 or (yc and size_rank(row) == 1)):
+            # Unknown size is allowed when Hunter can check it after finding a
+            # verified leader; companies known to be outside 10-200 are skipped.
+            if not (size_rank(row) == 0 or (size_rank(row) == 1 and (yc or (finder is not None and hunter.api_key())))):
                 tally['size_unknown' if size_rank(row) == 1 else 'outside_size'].add(ck)
                 continue
             earlier = lookups.get(ck, {})
@@ -702,7 +716,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                 # Name and role for the greeting and LinkedIn note, even with no email.
                 meta.update({'Manager Name': lead['name'], 'Manager Role': lead['title'], 'Manager Source': lead['source'],
                              'Manager LinkedIn': lead['url'] if 'linkedin.com/in/' in lead['url'] else ''})
-            if earlier.get('checked', '') >= recheck:
+            if earlier.get('checked', '') >= (recheck if earlier.get('contact') else recheck_empty):
                 meta.update(earlier.get('contact') or {})
             elif finder is not None:
                 domain = founders.company_domain(row['Company'], [s.get('url', '') for s in meta.get('_sources', [])]
@@ -713,10 +727,22 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                         # One Domain Search lists the company's executives with
                         # verified emails; it needs no name, and no website
                         # either (the company name is enough).
-                        executives = hunter.executives(founders.plain_name(row['Company']), domain,
-                                                       state_dir / 'hunter-usage.json',
+                        executives = hunter.executives(founders.plain_name(row['Company']), domain, hunter_usage,
                                                        email_cfg.get('hunter_monthly_limit', 50))
                         contact = founders.contact_from_executives(row['Company'], executives, domain_given=bool(domain))
+                        if contact and size_rank(row) == 1:
+                            # Size unknown: Hunter's company lookup decides.
+                            email_domain = contact['Public Work Email'].split('@')[1]
+                            size = hunter.company_size(email_domain, hunter_usage, email_cfg.get('hunter_monthly_limit', 50))
+                            if size:
+                                sizes[ck] = {'Employee Count': founders.size_label(size), 'low': size[0], 'high': size[1],
+                                             'Employee Count Source': f'https://hunter.io (company enrichment for {email_domain})',
+                                             'checked': today_iso}
+                                meta.update({'Employee Count': sizes[ck]['Employee Count'],
+                                             'Employee Count Source': sizes[ck]['Employee Count Source']})
+                                if not founders.in_target(size, *target):
+                                    progress(f"Hunter {row['Company']}: {founders.size_label(size)} employees, outside 10-200; not used.")
+                                    contact = {}
                         leaders_listed = [e for e in executives if founders.LEADER.search(e.get('title', ''))]
                         progress(f"Hunter {row['Company']} ({domain or 'by name'}): {len(executives)} executives listed"
                                  f" for {executives[0]['organization'] if executives else 'no match'}; "
@@ -740,7 +766,8 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                         progress(f"Verified email for {contact['Email Contact Role']} at {row['Company']}.")
             lookups[ck] = earlier
         atomic_json(lookups_path, lookups)
-        progress(f"Founder emails: {tally['looked_up']} companies of 10-200 people looked up, {tally['verified']} verified; "
+        atomic_json(sizes_path, sizes)
+        progress(f"Founder emails: {tally['looked_up']} startups looked up, {tally['verified']} verified; "
                  f"{len(tally['size_unknown'])} skipped because company size is unknown, "
                  f"{len(tally['outside_size'])} outside 10-200 people.")
     def priority(row):
@@ -749,6 +776,8 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         return (*freshness(row), backing, row['Fit Status'] != 'in_scope', -float(row.get('Rule Score') or 0))
     focus.sort(key=priority)
     roles, drafted_companies, reused = [], set(), 0
+    import shutil
+    shutil.rmtree(out / 'resumes', ignore_errors=True)  # rebuilt for today's rows
     for row in focus:
         remaining(deadline)
         key = row['Company'].casefold()
@@ -762,6 +791,11 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         roles.append({'Company': row['Company'], 'Job Link': row['Job Link'],
                       **{k: meta.get(k, '') for k in META}, **draft,
                       'Draft JD SHA256': row['JD SHA256'], 'Requires Fit Review': row['Fit Status'] != 'in_scope'})
+        if facts.get('resume'):
+            try:
+                roles[-1].update(tailored_resume.build_for_row(facts['resume'], row, out))
+            except Exception as exc:
+                issues.append({'stage': 'tailored_resume', 'company': row['Company'], 'error': type(exc).__name__})
         drafted_companies.add(key)
     from jobagent.outreach.report_drafts import draft_recipient
     new_contacts = sum(bool(draft_recipient(r)) for r in roles)

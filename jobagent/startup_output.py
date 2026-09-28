@@ -23,6 +23,7 @@ RESEARCH_FIELDS = [
     "Email Ownership Status", "Email Ownership Checked At",
     "Email Contact Name", "Email Contact Role", "Email Contact LinkedIn", "Company Display Name",
     "Email Template", "Employee Count", "Employee Count Source",
+    "Resume File", "ATS Match", "ATS Matched Keywords", "ATS Missing Keywords", "Resume Headline",
 ]
 SHORTLIST_FIELDS = ["Company", "Job Title", "Location", "Job Link", "JD Text",
                     "Fit Status", "Fit Notes", "Framework Review", "Duplicate Listing URLs", *RESEARCH_FIELDS,

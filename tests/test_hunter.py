@@ -121,6 +121,30 @@ def test_empty_domain_search_uses_no_credit(tmp_path):
     assert not (tmp_path / "u.json").exists()
 
 
+def test_company_size_from_enrichment(tmp_path):
+    get, _ = fake_hunter([Response(200, {"data": {"metrics": {"employees": "11-50"}}}),
+                          Response(200, {"data": {"metrics": {"employeesCount": 42, "employees": "11-50"}}}),
+                          Response(404, {})])
+    assert hunter.company_size("beta.io", tmp_path / "u.json", get=get) == (11, 50)
+    assert hunter.company_size("beta.io", tmp_path / "u.json", get=get) == (42, 42)
+    assert hunter.company_size("beta.io", tmp_path / "u.json", get=get) is None
+
+
+def test_daily_allowance_spreads_the_month(tmp_path, monkeypatch):
+    import calendar
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    days_left = calendar.monthrange(now.year, now.month)[1] - now.day + 1
+    found = {"data": {"email": "a@beta.io", "verification": {"status": "valid"}}}
+    get, _ = fake_hunter([Response(200, found) for _ in range(60)])
+    finder = hunter.make_finder(tmp_path / "u.json", monthly_limit=50, get=get)
+    allowance = -(-50 // days_left)
+    for _ in range(allowance):
+        finder([PERSON])
+    with pytest.raises(hunter.HunterError):
+        finder([PERSON])
+
+
 def test_hunter_result_becomes_a_sendable_contact(tmp_path):
     get, _ = fake_hunter([Response(200, {"data": {"email": "cai@beta.io", "score": 96, "verification": {"status": "valid"}}})])
     people = [{"name": "Cai Tech", "title": "Co-founder & CTO", "url": "https://www.linkedin.com/in/cai",
