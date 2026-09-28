@@ -91,6 +91,15 @@ jobs:
           JOBAGENT_REVIEWED_CONTACTS_JSON: ${{ secrets.JOBAGENT_REVIEWED_CONTACTS_JSON }}
         run: python -m jobagent.cloud_state prepare
 
+      # "Validate only" also confirms the contact-provider keys, using only
+      # free calls (Hunter account status, one 0-credit Apollo search).
+      - name: Check Hunter and Apollo keys (no credits used)
+        if: github.event.inputs.validate_only == 'true'
+        env:
+          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
+          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+        run: python tools/check_contact_providers.py
+
       - name: Reset today's completion marker (manual force-run only)
         if: github.event.inputs.force_run == 'true' && github.event.inputs.validate_only != 'true'
         # Also clears today's saved searches, so a forced run searches afresh
