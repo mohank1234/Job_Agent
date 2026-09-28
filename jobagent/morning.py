@@ -678,6 +678,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         else:
             finder = None
         recheck = discovery.recent_cutoff(today, email_cfg.get('recheck_days', 30))
+        tally = {'looked_up': 0, 'verified': 0, 'size_unknown': set(), 'outside_size': set()}
         for row in focus:
             key, ck = row['Company'].casefold(), company_key(row['Company'])
             meta = metadata.get(key)
@@ -685,6 +686,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                 continue
             yc = row.get('Listing Type', '').startswith('Y Combinator')
             if not (size_rank(row) == 0 or (yc and size_rank(row) == 1)):
+                tally['size_unknown' if size_rank(row) == 1 else 'outside_size'].add(ck)
                 continue
             earlier = lookups.get(ck, {})
             if earlier.get('leaders_checked', '') >= recheck:
@@ -715,6 +717,11 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                                                        state_dir / 'hunter-usage.json',
                                                        email_cfg.get('hunter_monthly_limit', 50))
                         contact = founders.contact_from_executives(row['Company'], executives, domain_given=bool(domain))
+                        leaders_listed = [e for e in executives if founders.LEADER.search(e.get('title', ''))]
+                        progress(f"Hunter {row['Company']} ({domain or 'by name'}): {len(executives)} executives listed"
+                                 f" for {executives[0]['organization'] if executives else 'no match'}; "
+                                 f"leaders: {', '.join(e['title'] + (' (verified)' if e['verified'] else '') for e in leaders_listed[:3]) or 'none'}; "
+                                 f"{'verified email used' if contact else 'no verified leader email'}.")
                     if not contact and people and domain:
                         contact = founders.verified_contact(people, domain, finder)
                 except Exception as exc:
@@ -725,12 +732,17 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                         progress('Free email-lookup allowance used for this month; remaining companies keep a named leader only.')
                         finder = None
                 if contact is not None:
+                    tally['looked_up'] += 1
                     earlier.update(checked=today_iso, domain=domain, contact=contact)
                     meta.update(contact)
                     if contact:
+                        tally['verified'] += 1
                         progress(f"Verified email for {contact['Email Contact Role']} at {row['Company']}.")
             lookups[ck] = earlier
         atomic_json(lookups_path, lookups)
+        progress(f"Founder emails: {tally['looked_up']} companies of 10-200 people looked up, {tally['verified']} verified; "
+                 f"{len(tally['size_unknown'])} skipped because company size is unknown, "
+                 f"{len(tally['outside_size'])} outside 10-200 people.")
     def priority(row):
         meta = metadata.get(row['Company'].casefold(), {})
         backing = 0 if re.fullmatch(r'[WSFX]\d{2,4}', meta.get('YC Batch', '').strip(), re.I) or 'y combinator' in meta.get('Investor Backing', '').lower() else 1 if meta.get('Investment Source') else 2
