@@ -70,7 +70,7 @@ morning:
     min_employees: 10
     max_employees: 200
     recheck_days: 30
-    hunter_monthly_limit: 25
+    hunter_monthly_limit: 50       # the free plan's monthly credits
     max_charge_per_run_usd: 0.5
   # Y Combinator's "Work at a Startup" board (1,000+ live postings) has no
   # public API of its own, unlike companies.yaml's board slugs. This calls a

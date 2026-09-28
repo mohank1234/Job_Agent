@@ -1,10 +1,11 @@
-"""Hunter.io Email Finder - free plan, no card (25 searches a month).
+"""Hunter.io Email Finder - free plan, no card (50 credits a month as of
+2026-09-28, shown on the dashboard).
 
 https://hunter.io/api-documentation/v2 (checked 2026-09-28): a search that
-finds no email is not charged; one that does uses one of the month's
-searches; past the limit Hunter answers 429 "usage limit reached" instead of
-billing. Two independent stops keep this at zero cost regardless:
-- a local monthly counter capped at `monthly_limit` (default 25), and
+finds no email is not charged; one that does uses the month's allowance;
+past the limit Hunter answers 429 "usage limit reached" instead of billing.
+Two independent stops keep this at zero cost regardless:
+- a local monthly counter capped at `monthly_limit` (default 50), and
 - Hunter's own account usage, read before every search when it reports it.
 
 Only addresses Hunter has verified ("valid") are used; "accept_all"
@@ -44,13 +45,17 @@ def account_searches_left(key, get=httpx.get):
         data = get(f"{API}/account", params={"api_key": key}, timeout=TIMEOUT).json().get("data", {})
     except Exception:
         return None
-    searches = (data.get("requests") or {}).get("searches") or {}
-    if "available" in searches and "used" in searches:
-        return max(0, int(searches["available"]) - int(searches["used"]))
-    return None
+    # Older plans report "searches"; current plans report shared "credits"
+    # (the free plan shows 50 a month). Whichever is reported, the smaller wins.
+    left = []
+    for kind in ("searches", "credits"):
+        counts = (data.get("requests") or {}).get(kind) or data.get(kind) or {}
+        if isinstance(counts, dict) and "available" in counts and "used" in counts:
+            left.append(max(0, int(counts["available"]) - int(counts["used"])))
+    return min(left) if left else None
 
 
-def make_finder(usage_path, monthly_limit=25, get=httpx.get):
+def make_finder(usage_path, monthly_limit=50, get=httpx.get):
     """A finder for founders.verified_contact(): [{firstName, surname, domain}]
     -> {(first, last): {email, validationStatus, overallScore}}; verified only."""
     key = api_key()

@@ -167,7 +167,7 @@ jobs:
         id: morning
         if: github.event.inputs.validate_only != 'true'
         # Only free-plan keys are given to the run: Exa (held inside its free
-        # credit) and Hunter.io (free plan, capped at 25 searches a month;
+        # credit) and Hunter.io (free plan, capped at 50 credits a month;
         # optional, add the HUNTER_API_KEY secret to enable it). The Apify,
         # Gemini and Firecrawl keys are deliberately absent, so no code path
         # can reach a paid service.

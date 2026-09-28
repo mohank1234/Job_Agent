@@ -672,7 +672,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         # the paid Apify verifier only with paid services allowed. Without
         # either, leaders are still named (greeting, LinkedIn), with no email.
         if hunter.api_key():
-            finder = hunter.make_finder(state_dir / 'hunter-usage.json', email_cfg.get('hunter_monthly_limit', 25))
+            finder = hunter.make_finder(state_dir / 'hunter-usage.json', email_cfg.get('hunter_monthly_limit', 50))
         elif allow_paid:
             finder = lambda people: find_emails(people, max_charge_per_run_usd=email_cfg.get('max_charge_per_run_usd', 0.5))
         else:

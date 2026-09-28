@@ -65,6 +65,13 @@ def test_account_with_no_searches_left_is_not_searched(tmp_path):
     assert calls == ["account"]
 
 
+def test_account_credits_are_respected(tmp_path):
+    get, calls = fake_hunter([], account={"requests": {"credits": {"used": 50, "available": 50}}})
+    with pytest.raises(hunter.HunterError):
+        hunter.make_finder(tmp_path / "usage.json", get=get)([PERSON])
+    assert calls == ["account"]
+
+
 def test_usage_limit_response_stops_and_not_found_is_free(tmp_path):
     get, _ = fake_hunter([Response(404, {}), Response(200, {"data": {"email": None}}), Response(429, {})])
     finder = hunter.make_finder(tmp_path / "usage.json", get=get)
