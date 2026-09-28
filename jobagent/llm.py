@@ -374,10 +374,52 @@ class GeminiProvider:
         ]
         self.max_tokens = int(cfg.get("max_tokens", 8000))
         self.last_model_used = self.model
+        self.discover_models = self.name == "gemini" and cfg.get("discover_fallbacks", True)
+        self._discovered: list[str] | None = None
+        self._gone: set[str] = set()
+        self._slow: set[str] = set()
+
+    def _available_text_models(self) -> list[str]:
+        """Text models this key can use now: the "-latest" aliases, then Lite
+        models (fast on long research prompts), then full Flash, newest first.
+        Google retires model names often (the 2.x names now return 404), so
+        the fallback list is read from the API, not written down."""
+        if self._discovered is None:
+            self._discovered = []
+            try:
+                ids = [m.id.split("/")[-1] for m in self.client.models.list()]
+            except Exception:
+                return []
+            text = [i for i in ids if re.fullmatch(r"gemini-[\w.-]*flash[\w.-]*", i)
+                    and not re.search(r"image|tts|audio|live|preview|omni", i)]
+
+            def rank(model_id):
+                version = re.search(r"gemini-(\d+(?:\.\d+)?)", model_id)
+                return (not model_id.endswith("-latest"), "lite" not in model_id,
+                        -(float(version.group(1)) if version else 99.0))
+            self._discovered = sorted(text, key=rank)
+        return self._discovered
+
+    def _candidates(self, discovered: bool):
+        models = [self.model, *self.fallback_models]
+        if discovered:
+            models += self._available_text_models()
+        models = [m for m in dict.fromkeys(models) if m not in self._gone]
+        # A model that was busy or too slow earlier in this run goes last.
+        return sorted(models, key=lambda m: m in self._slow)
 
     def _chat(self, system: str, prompt: str, max_tokens: int, response_format=None):
         errors: list[str] = []
-        for model in [self.model, *self.fallback_models]:
+        tried: set[str] = set()
+        # Configured models first; only when all of those fail (busy, retired,
+        # rate limited) are the key's other available models looked up and
+        # tried. After that lookup, one ranked list is used for every call.
+        first = self._candidates(self.discover_models and self._discovered is not None)
+        later = self._candidates(True) if self.discover_models else []
+        for model in [*first, *later]:
+            if model in tried:
+                continue
+            tried.add(model)
             kwargs = dict(
                 model=model,
                 max_tokens=min(max_tokens, self.max_tokens),
@@ -391,6 +433,10 @@ class GeminiProvider:
             try:
                 resp = self.client.chat.completions.create(**kwargs)
             except Exception as exc:
+                if type(exc).__name__ == "NotFoundError":
+                    self._gone.add(model)  # retired; skip it for the rest of the run
+                elif type(exc).__name__ in ("InternalServerError", "RateLimitError", "APITimeoutError"):
+                    self._slow.add(model)
                 errors.append(f"{model}: {type(exc).__name__}: {str(exc)[:120]}")
                 continue
             if not resp.choices:
@@ -398,7 +444,7 @@ class GeminiProvider:
                 continue
             self.last_model_used = model
             return resp.choices[0].message.content or ""
-        raise ProviderError("gemini: " + " | ".join(errors[:3]))
+        raise ProviderError(f"{self.name}: " + " | ".join(errors[:3]))
 
     def structured(self, system: str, prompt: str, model_cls):
         schema = model_cls.model_json_schema()

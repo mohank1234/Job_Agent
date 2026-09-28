@@ -399,10 +399,11 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     state_dir = run_dir.parent
     today = datetime.now(IST).date()
     llm_base = config.get('llm', {})
-    # Hosted APIs answer in seconds, so a short cap keeps a stuck call from eating
-    # the window. A local model needs its full timeout or every call is abandoned.
+    # A research prompt carries up to ~120k characters of source pages; hosted
+    # models measured 30-60 seconds on those, so a shorter cap abandoned calls
+    # that were about to succeed. A local model needs its full timeout.
     research_timeout = llm_base.get('research_timeout_seconds',
-                                    llm_base.get('timeout_seconds', 900) if llm_base.get('provider') == 'ollama' else 25)
+                                    llm_base.get('timeout_seconds', 900) if llm_base.get('provider') == 'ollama' else 90)
     llm_config = {**llm_base, 'timeout_seconds': research_timeout, 'max_tokens': 5000}
     provider = None
     try:
@@ -551,7 +552,10 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     history = read_json(history_path, {})
     cooldown = discovery.recent_cutoff(today, cfg.get('research_cooldown_days', 14))
     def contacted(row):
-        return hashlib.sha256(company_key(row['Company']).encode()).hexdigest()[:24] in ledger
+        # Sent only: an unsent draft stays in the report so it can still be
+        # sent (automatically in auto-send mode) instead of being stranded.
+        entry = ledger.get(hashlib.sha256(company_key(row['Company']).encode()).hexdigest()[:24], {})
+        return entry.get('state') == 'sent'
     def freshness(row):
         last = history.get(company_key(row['Company']), {}).get('researched', '')
         return (contacted(row), cooldown <= last < today_iso,
@@ -575,8 +579,14 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         from jobagent.outreach.daily_research import apply_reviewed_contact
         metadata[key] = apply_reviewed_contact(metadata[key], reviewed.get(company_key(key)))
         issues += [{'stage': 'company_research', 'company': row['Company'], 'error': e} for e in metadata[key].get('_errors', [])]
-    for key in metadata:
-        history.setdefault(company_key(key), {})['researched'] = today_iso
+    for key, meta in metadata.items():
+        # Failed research is not research: the company stays at the front
+        # of the queue instead of waiting out the cooldown.
+        if meta.get('_errors'):
+            if history.get(company_key(key), {}).get('researched') == today_iso:
+                history[company_key(key)].pop('researched')
+        else:
+            history.setdefault(company_key(key), {})['researched'] = today_iso
     atomic_json(history_path, history)
     def priority(row):
         meta = metadata.get(row['Company'].casefold(), {})

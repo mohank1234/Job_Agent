@@ -199,6 +199,8 @@ def research_company(row, cache_dir, provider, *, seed=None, deadline=None, sear
             data = validate_research(suggested, sources, company)
         except Exception as exc:
             errors.append(type(exc).__name__)
+            # Not cached: a busy model must not become the day's final answer.
+            path = None
     # Preserve dated, supported manager/backing facts if new research found no replacement.
     if seed and recent(seed.get('Research Checked At'), max_age_days=7):
         manager_fields = {'Manager Name', 'Manager Role', 'Manager LinkedIn', 'Manager Source', 'Contact Status'}
@@ -213,7 +215,8 @@ def research_company(row, cache_dir, provider, *, seed=None, deadline=None, sear
         data['Research Checked At'] = seed['Research Checked At']
     data['_errors'] = errors
     data['_sources'] = sources
-    atomic_json(path, data)
+    if path:
+        atomic_json(path, data)
     return data
 
 

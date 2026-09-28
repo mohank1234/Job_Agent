@@ -280,6 +280,17 @@ def test_daily_work_moves_on_to_fresh_companies_and_reports_what_is_new(tmp_path
     assert (state/'first-seen.json').is_file()
 
 
+def test_failed_research_is_retried_not_cached(tmp_path):
+    from jobagent.outreach.daily_research import research_company
+    class Busy:
+        def structured(self, *a):
+            raise RuntimeError('model busy')
+    row = {'Company': 'Example', 'JD Source URL': 'https://jobs.ashbyhq.com/example/1', 'JD Text': 'QA role'}
+    data = research_company(row, tmp_path, Busy(), search=lambda *a, **k: [])
+    assert data['_errors'] == ['RuntimeError']
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize('role,number,phrase',[
     ('Founder and CEO','1','sharing my attached resume'),
     ('Technical Recruiter','3',"I've attached my resume"),
