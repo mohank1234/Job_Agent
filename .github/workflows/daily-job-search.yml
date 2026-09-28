@@ -153,6 +153,9 @@ jobs:
                            'research_timeout_seconds': 300, 'max_prompt_chars': 16000,
                            'free_models_only': True, 'free_providers': ['ollama']}
           config.setdefault('billing', {})['allow_paid_services'] = False
+          # Drafts only, always: every email waits in Gmail Drafts for review;
+          # nothing is sent automatically and no automatic follow-ups.
+          config.setdefault('outreach', {}).setdefault('gmail', {})['mode'] = 'draft_only'
           morning = config.setdefault('morning', {})
           # Web search is held inside Exa's free monthly credit; spend it on
           # the rotating profile searches rather than the same fixed ones.
@@ -160,7 +163,7 @@ jobs:
           morning.setdefault('rotating_queries', 4)
           morning.setdefault('growth_queries', 2)
           path.write_text(yaml.safe_dump(config, sort_keys=False), encoding='utf-8')
-          print('Free-only: local Ollama model, no paid services, web search within free credit.')
+          print('Free-only: local Ollama model, no paid services, web search within free credit; outreach saved as drafts only.')
           PY
 
       - name: Run morning pipeline

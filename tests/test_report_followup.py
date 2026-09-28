@@ -162,21 +162,17 @@ def test_sourced_recipient_and_signature_update_existing_draft(tmp_path):
     assert service.created==2
 
 
-def test_draft_without_sourced_recipient_has_blank_to_and_is_never_sent(tmp_path):
+def test_no_gmail_draft_or_reservation_without_sourced_recipient(tmp_path):
     row={'Company':'Example','Job Link':'https://jobs.example/1','Cold Email Subject':'QA opportunity',
          'Cold Email':'Hi Alex','Public Work Email':'guessed@example.com'}
     with (tmp_path/'Startup Outreach.csv').open('w',newline='',encoding='utf-8') as f:
         writer=csv.DictWriter(f,fieldnames=list(row));writer.writeheader();writer.writerow(row)
     service=FakeGmail()
     ledger=tmp_path/'ledger.json'
-    result=sync_report_drafts(tmp_path,'candidate@example.com',ledger_path=ledger,service=service,auto_send=True)
-    assert result[0]['Status']=='Created and read back'
-    assert result[0]['Recipient']=='Public email not available; To left blank'
-    assert service.created==1
-    # The unsourced address is never filled in, and a blank-To draft is not
-    # sent (FakeGmail has no send(); an attempt would change the status).
-    from jobagent.outreach.report_drafts import decode_draft
-    assert decode_draft(service.data['1'])['to']==''
+    result=sync_report_drafts(tmp_path,'candidate@example.com',ledger_path=ledger,service=service)
+    assert result[0]['Status']=='Pending contact research; saved in Excel only'
+    assert service.created==0 and service.updated==0
+    assert not ledger.exists()
 
 
 def test_headerless_draft_recovers_after_lost_create_response(tmp_path):
