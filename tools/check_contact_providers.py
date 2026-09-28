@@ -29,7 +29,8 @@ def check_hunter():
     requests = data.get("requests") or {}
     parts = [f"{kind} {c.get('used', '?')}/{c.get('available', '?')} used"
              for kind, c in requests.items() if isinstance(c, dict)]
-    return f"Hunter: OK - plan {data.get('plan_name', '?')}; {', '.join(parts) or 'usage not reported'}."
+    return (f"Hunter: OK - plan {data.get('plan_name', '?')}; {', '.join(parts) or 'usage not reported'}; "
+            f"free credits renew on {data.get('reset_date') or 'an unreported date'}.")
 
 
 def check_apollo():

@@ -145,6 +145,28 @@ def test_daily_allowance_spreads_the_month(tmp_path, monkeypatch):
         finder([PERSON])
 
 
+def test_pacing_follows_hunters_own_reset_date(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    reset = (datetime.now(timezone.utc) + timedelta(days=10)).date().isoformat()
+    state = {"used": 20}
+    calls = []
+
+    def get(url, params, timeout):
+        calls.append(url.rsplit("/", 1)[-1])
+        if url.endswith("/account"):
+            return Response(200, {"data": {"reset_date": reset,
+                                           "requests": {"credits": {"used": state["used"], "available": 50}}}})
+        state["used"] += 1  # Hunter charges one credit per found email
+        return Response(200, {"data": {"email": "a@beta.io", "verification": {"status": "valid"}}})
+    finder = hunter.make_finder(tmp_path / "u.json", monthly_limit=50, get=get)
+    # 30 credits left over 10 days: 3 today, then the day's share is used.
+    for _ in range(3):
+        finder([PERSON])
+    with pytest.raises(hunter.HunterError) as err:
+        finder([PERSON])
+    assert "(3)" in str(err.value)
+
+
 def test_hunter_result_becomes_a_sendable_contact(tmp_path):
     get, _ = fake_hunter([Response(200, {"data": {"email": "cai@beta.io", "score": 96, "verification": {"status": "valid"}}})])
     people = [{"name": "Cai Tech", "title": "Co-founder & CTO", "url": "https://www.linkedin.com/in/cai",

@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -52,8 +52,10 @@ def _refused(resp):
         raise HunterError("free_limit_reached", f"Hunter refused the request (HTTP {resp.status_code})")
 
 
-def account_searches_left(key, get=httpx.get):
-    """Searches left this month according to Hunter, or None if not reported."""
+def account_status(key, get=httpx.get):
+    """{'left': credits left per Hunter or None, 'reset': the date Hunter's
+    free allowance renews or None}. Hunter's cycle follows the signup date,
+    not the calendar month, so pacing uses its own reset date when given."""
     try:
         resp = get(f"{API}/account", params={"api_key": key}, timeout=TIMEOUT)
         _refused(resp)
@@ -62,15 +64,24 @@ def account_searches_left(key, get=httpx.get):
     except HunterError:
         raise
     except Exception:
-        return None
+        return {"left": None, "reset": None}
     # Older plans report "searches"; current plans report shared "credits"
     # (the free plan shows 50 a month). Whichever is reported, the smaller wins.
     left = []
     for kind in ("searches", "credits"):
         counts = (data.get("requests") or {}).get(kind) or data.get(kind) or {}
         if isinstance(counts, dict) and "available" in counts and "used" in counts:
-            left.append(max(0, int(counts["available"]) - int(counts["used"])))
-    return min(left) if left else None
+            left.append(max(0, int(float(counts["available"])) - int(float(counts["used"]))))
+    try:
+        reset = date.fromisoformat(str(data.get("reset_date") or "")[:10])
+    except ValueError:
+        reset = None
+    return {"left": min(left) if left else None, "reset": reset}
+
+
+def account_searches_left(key, get=httpx.get):
+    """Searches left according to Hunter, or None if not reported."""
+    return account_status(key, get)["left"]
 
 
 def _spend_check(usage_path, monthly_limit, key, get):
@@ -85,14 +96,26 @@ def _spend_check(usage_path, monthly_limit, key, get):
         usage.update(day=now.strftime("%Y-%m-%d"), before_today=usage["searches"])
     if usage["searches"] >= monthly_limit:
         raise HunterError("free_limit_reached", f"Hunter free searches used for {usage['month']}")
-    # Spread the month's free credits over the days left, best companies first each day.
-    days_left = calendar.monthrange(now.year, now.month)[1] - now.day + 1
-    allowance = math.ceil((monthly_limit - usage["before_today"]) / days_left)
-    if usage["searches"] - usage["before_today"] >= allowance:
-        raise HunterError("free_limit_reached", f"Hunter allowance for today ({allowance}) used")
-    left = account_searches_left(key, get)
+    status = account_status(key, get)
+    left = status["left"]
     if left is not None and left <= 0:
-        raise HunterError("free_limit_reached", "Hunter reports no searches left this month")
+        raise HunterError("free_limit_reached", "Hunter reports no searches left until its reset date")
+    # Spread the free credits evenly until they renew, best companies first
+    # each day. Hunter's own reset date and balance when it reports them;
+    # otherwise the calendar month and the local counter.
+    if left is not None and status["reset"] and status["reset"] > now.date():
+        if usage.get("left_day") != now.strftime("%Y-%m-%d"):
+            usage.update(left_day=now.strftime("%Y-%m-%d"), left_at_day_start=left)
+            atomic_json(Path(usage_path), usage)
+        days_left = (status["reset"] - now.date()).days
+        allowance = math.ceil(usage["left_at_day_start"] / days_left)
+        used_today = usage["left_at_day_start"] - left
+    else:
+        days_left = calendar.monthrange(now.year, now.month)[1] - now.day + 1
+        allowance = math.ceil((monthly_limit - usage["before_today"]) / days_left)
+        used_today = usage["searches"] - usage["before_today"]
+    if used_today >= allowance:
+        raise HunterError("free_limit_reached", f"Hunter allowance for today ({allowance}) used")
     return usage
 
 
