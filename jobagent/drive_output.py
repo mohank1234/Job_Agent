@@ -26,6 +26,18 @@ class DriveOutputError(ValueError):
     pass
 
 
+def _retrying_request():
+    from googleapiclient.http import HttpRequest
+
+    class Retrying(HttpRequest):
+        """Every Drive call retries dropped connections (an SSLEOFError
+        failed a whole run's publication on 2026-09-28) and 429/5xx
+        responses, with the library's exponential backoff."""
+        def execute(self, http=None, num_retries=4):
+            return super().execute(http=http, num_retries=num_retries)
+    return Retrying
+
+
 def authenticate_drive(expected_account, *, interactive=False):
     from google.auth.transport.requests import Request
     from google.auth.exceptions import RefreshError
@@ -59,7 +71,7 @@ def authenticate_drive(expected_account, *, interactive=False):
         granted = creds.granted_scopes or creds.scopes or []
         if DRIVE_SCOPE not in granted:
             raise DriveOutputError("Google Drive file access was not granted")
-    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+    drive = build("drive", "v3", credentials=creds, cache_discovery=False, requestBuilder=_retrying_request())
     account = drive.about().get(fields="user(emailAddress),importFormats").execute()
     if account["user"]["emailAddress"].casefold() != expected_account.casefold():
         raise DriveOutputError("Wrong Google account; no output will be created")

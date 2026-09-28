@@ -112,9 +112,10 @@ jobs:
 
       # Zero cost: the AI model runs on this GitHub machine (free for a public
       # repository) instead of a hosted API, and pay-per-use services are off.
-      - name: Cache the local AI model
+      - name: Restore the cached local AI model
+        id: model-cache
         if: github.event.inputs.validate_only != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/.ollama/models
           key: ollama-models-qwen2.5-3b-v1
@@ -128,6 +129,15 @@ jobs:
           for i in $(seq 1 60); do curl -sf http://localhost:11434/api/tags > /dev/null && break; sleep 1; done
           ollama pull qwen2.5:3b
           ollama list
+
+      # Saved right after download, so a later failure does not force the
+      # next run to download the model again.
+      - name: Cache the local AI model
+        if: github.event.inputs.validate_only != 'true' && steps.model-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-models-qwen2.5-3b-v1
 
       - name: Use free services only
         if: github.event.inputs.validate_only != 'true'
