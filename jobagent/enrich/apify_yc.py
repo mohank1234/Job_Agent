@@ -30,10 +30,19 @@ TIMEOUT = httpx.Timeout(310.0, connect=10.0)
 ApifyError = AdapterError
 
 
-def fetch_yc_jobs(queries, *, max_items=40, max_total_charge_usd=0.15, remote_only=False):
-    """Return raw Apify job dicts (id, title, company, location, description,
-    isRemote, salary, ...). Raises ApifyError on failure - an empty list
-    must never silently mean "the call broke"."""
+# The actor's input (schema v2, checked 2026-09-28): at most 20 queries, each
+# matching postings that contain every word of it; maxItems above 200 means
+# 200. "dedupe" is on by default and hides postings already delivered to this
+# account for the same search, so a repeat run returned 5 postings instead of
+# 49 and still-open jobs vanished from the report. It is always turned off.
+MAX_QUERIES = 20
+MAX_ITEMS = 200
+
+
+def fetch_yc_jobs(queries, *, max_items=MAX_ITEMS, max_total_charge_usd=0.6):
+    """Return raw Apify job dicts (id, url, title, company, locations,
+    workType, salary, description, hiringContacts, ...). Raises ApifyError
+    on failure - an empty list must never silently mean "the call broke"."""
     api_key = os.environ.get("APIFY_API_KEY", "")
     if not api_key:
         raise ApifyError("unauthorized", "APIFY_API_KEY is not set")
@@ -41,7 +50,9 @@ def fetch_yc_jobs(queries, *, max_items=40, max_total_charge_usd=0.15, remote_on
         resp = httpx.post(
             APIFY_URL,
             params={"token": api_key, "maxTotalChargeUsd": str(max_total_charge_usd)},
-            json={"queries": list(queries), "maxItems": max_items, "remoteOnly": remote_only},
+            json={"schemaVersion": "nomad-agent-simple-inventory-search-v2",
+                  "queries": list(queries)[:MAX_QUERIES], "maxItems": min(max_items, MAX_ITEMS),
+                  "dedupe": {"enabled": False, "key": ""}},
             timeout=TIMEOUT,
         )
         resp.raise_for_status()

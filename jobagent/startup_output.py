@@ -22,7 +22,7 @@ RESEARCH_FIELDS = [
     "Approval Status", "Draft Generation", "Contact Status", "Backing Status",
     "Email Ownership Status", "Email Ownership Checked At",
     "Email Contact Name", "Email Contact Role", "Email Contact LinkedIn", "Company Display Name",
-    "Email Template",
+    "Email Template", "Employee Count", "Employee Count Source",
 ]
 SHORTLIST_FIELDS = ["Company", "Job Title", "Location", "Job Link", "JD Text",
                     "Fit Status", "Fit Notes", "Framework Review", "Duplicate Listing URLs", *RESEARCH_FIELDS,
@@ -80,7 +80,10 @@ def enrich_rows(rows, research):
             continue
         row.update({key: entry.get(key, "") for key in RESEARCH_FIELDS})
         fresh_research = recent(entry.get("Research Checked At"), max_age_days=30)
-        row["Research Status"] = "Dated public research; email delivery not tested" if fresh_research else "Research older than 30 days; recheck contacts and backing"
+        verified = (entry.get("Email Ownership Status") or "").startswith("Verified deliverable")
+        row["Research Status"] = ("Research older than 30 days; recheck contacts and backing" if not fresh_research
+                                  else "Dated public research; email mailbox verified deliverable" if verified
+                                  else "Dated public research; email delivery not tested")
         jd = row.get("JD Text", "")
         live = (row.get("JD Status") == "verified_live" and recent(row.get("JD Verified At"), max_age_days=1)
                 and len(jd.strip()) >= 200 and hashlib.sha256(jd.encode()).hexdigest() == row.get("JD SHA256"))

@@ -44,6 +44,20 @@ morning:
   # researched again, so new companies get the research budget first.
   # Companies already contacted are left to the follow-up step.
   research_cooldown_days: 14
+  # Startups of about 10-200 people are researched first, and for them the
+  # run looks for a verified founder / CTO / CEO email. Employee count comes
+  # from the search-indexed LinkedIn company page; leaders from YC hiring
+  # contacts, company research, and search-indexed LinkedIn profiles (LinkedIn
+  # is never fetched). An address is used only when the Apify actor
+  # clearpath/email-finder-api verifies the mailbox deliverable and safe to
+  # send on the company's own domain ($0.005/run + $0.008 per pattern
+  # tested, one person at a time, results kept for recheck_days).
+  founder_emails:
+    enabled: true
+    min_employees: 10
+    max_employees: 200
+    recheck_days: 30
+    max_charge_per_run_usd: 0.5
   # Y Combinator's "Work at a Startup" board (1,000+ live postings) has no
   # public API of its own, unlike companies.yaml's board slugs. This calls a
   # paid Apify actor (nomad-agent/ycombinator-was-scraper) instead - real
@@ -56,9 +70,11 @@ morning:
   apify_yc:
     enabled: false
     queries: ["QA", "SDET", "quality engineer", "software test engineer", "test automation"]
-    # These terms plus the profile's target titles form a pool; each run uses
-    # a different slice of it, so the same postings are not returned daily.
-    queries_per_day: 5
+    # These terms plus the profile's short target titles are all sent each
+    # run (the actor takes up to 20; a longer pool rotates daily). A query
+    # matches postings containing every one of its words, so keep terms
+    # short. The actor's repeat-delivery suppression is always turned off, so
+    # still-open postings keep appearing; the actor returns at most 200.
 
 llm:
   # PROVIDER. Default is a local Ollama model: no API key, no quota, nothing

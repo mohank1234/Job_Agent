@@ -280,6 +280,56 @@ def test_daily_work_moves_on_to_fresh_companies_and_reports_what_is_new(tmp_path
     assert (state/'first-seen.json').is_file()
 
 
+def test_daily_work_finds_verified_cto_email_for_small_startup(tmp_path, monkeypatch):
+    import dataclasses
+    import json
+    from jobagent import llm
+    from jobagent.enrich import email_finder, exa
+    from jobagent.outreach import daily_research
+    from jobagent.runtime import now_iso
+    project = tmp_path/'project'
+    (project/'resume').mkdir(parents=True)
+    (project/'companies.yaml').write_text('ashby: [beta]\n', encoding='utf-8')
+    (project/'resume'/'resume_data.py').write_text("NAME='Candidate'\nSUMMARY='QA'\nEXPERIENCE=[{'bullets':['Built Selenium tests.']}]\n", encoding='utf-8')
+    job = dataclasses.replace(posting(), company='beta', url='https://jobs.ashbyhq.com/beta/1')
+    job.description += ' Qualifications: 5 years of QA experience.'
+    record = {'Company':'beta','Vendor':'ashby','Board URL':'https://jobs.ashbyhq.com/beta','Status':'Fetched',
+              'Checked At':now_iso(),'Postings':1,'QA titles':1,
+              'Source URL':'https://api.ashbyhq.com/posting-api/job-board/beta','jobs':[morning._job_dict(job)]}
+    def search(query, *a, **k):
+        if k.get('include_domains') == ['linkedin.com'] and 'employees' in query:
+            return [{'url':'https://linkedin.com/company/beta','snippet':'# Beta\n- Company Size: 11-50 employees'}]
+        if k.get('include_domains') == ['linkedin.com']:
+            return [{'url':'https://www.linkedin.com/in/cai','snippet':'# Cai Tech\n\nCo-founder & CTO at Beta'}]
+        return []
+    finder_calls = []
+    def find_emails(people, **k):
+        finder_calls.append(people)
+        return {('cai', 'tech'): {'email': 'cai@beta.io', 'validationStatus': 'valid', 'overallScore': 97}}
+    monkeypatch.setattr(morning, 'ROOT', project)
+    monkeypatch.setattr(morning, 'collect_boards', lambda *a, **k: [record])
+    monkeypatch.setattr(llm, 'make_provider', lambda cfg: None)
+    monkeypatch.setattr(exa, 'exa_search', search)
+    monkeypatch.setattr(email_finder, 'find_emails', find_emails)
+    monkeypatch.setattr(daily_research, 'research_company', lambda row, *a, **k: {
+        'Research Checked At': now_iso(), '_errors': [], '_sources': [{'url': 'https://www.beta.io/about'}]})
+    profile = load_profile(Path(__file__).resolve().parents[1]/'profile.yaml.example')
+    profile.raw['identity']['experience']['years'] = 5
+    out, state = project/'out', project/'state'
+    (state/'2026-09-28').mkdir(parents=True)
+    summary = morning.daily_work({'morning':{}}, profile, out, state/'2026-09-28', progress=lambda *a:None)
+    assert finder_calls == [[{'firstName': 'Cai', 'surname': 'Tech', 'domain': 'beta.io'}]]
+    rows = list(__import__('csv').DictReader((out/'Startup Outreach.csv').open(encoding='utf-8-sig')))
+    assert rows[0]['Public Work Email'] == 'cai@beta.io' and rows[0]['Employee Count'] == '11-50'
+    assert rows[0]['Cold Email'].startswith('Hi Cai,')
+    assert summary['new_contacts'] == 1 and summary['verified_founder_emails'] == 1
+    assert summary['companies_10_to_200_employees'] == 1
+    # A second run the same month reuses the lookup instead of paying again.
+    (state/'2026-09-29').mkdir()
+    morning.daily_work({'morning':{}}, profile, out, state/'2026-09-29', progress=lambda *a:None)
+    assert len(finder_calls) == 1
+
+
 def test_failed_research_is_retried_not_cached(tmp_path):
     from jobagent.outreach.daily_research import research_company
     class Busy:

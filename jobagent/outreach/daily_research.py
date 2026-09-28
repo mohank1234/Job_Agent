@@ -29,7 +29,8 @@ META = ['Startup Priority', 'Investor Backing', 'YC Batch', 'Investment Source',
         'Manager Source', 'Public Work Email', 'Email Evidence', 'Email Source',
         'Other Public Contact', 'Other Contact Evidence', 'Contact Status', 'Backing Status',
         'Email Ownership Status', 'Email Ownership Checked At',
-        'Email Contact Name', 'Email Contact Role', 'Email Contact LinkedIn', 'Company Display Name']
+        'Email Contact Name', 'Email Contact Role', 'Email Contact LinkedIn', 'Company Display Name',
+        'Employee Count', 'Employee Count Source']
 
 
 class PublicResearch(BaseModel):

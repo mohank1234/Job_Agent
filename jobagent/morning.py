@@ -26,9 +26,8 @@ BOARD_URLS = {"greenhouse": "https://job-boards.greenhouse.io/{}/jobs",
               "phonepe": "https://www.phonepe.com/careers/job-openings/"}
 BOARD_ALIASES = {('greenhouse','ocrolus'):('greenhouse','ocrolusinc'),
                  ('greenhouse','phonepe'):('phonepe','phonepe')}
-# Work at a Startup lists roughly a thousand live postings in total, so this
-# returns every match for the day's search terms.
-YC_ALL_ITEMS = 1000
+# The YC actor's own maximum per run (see jobagent/enrich/apify_yc.py).
+YC_ALL_ITEMS = 200
 EXPERIENCE = re.compile(r"(?<![\d.])(\d{1,2})(?:\s*(?:[-\u2013\u2014]|to)\s*(\d{1,2}))?\s*(\+)?\s*(?:years?|yrs?)\b", re.I)
 
 
@@ -225,9 +224,11 @@ def assess_apify_leads(items, profile):
         title, company = item.get("title") or "", item.get("company") or ""
         if not job_id or not title or not company or len(description) < 200:
             continue
-        url = f"https://www.workatastartup.com/jobs/{job_id}"
-        location = item.get("location") or ""
-        workplace = "remote" if item.get("isRemote") else infer_workplace(location)
+        # Output schema v2 has url/locations/workType; v1 had location/isRemote.
+        url = item.get("url") or f"https://www.workatastartup.com/jobs/{job_id}"
+        location = item.get("location") or ", ".join(item.get("locations") or [])
+        workplace = (item.get("workType") or ("remote" if item.get("isRemote") else "")
+                     or infer_workplace(location))
         job = Job(source="workatastartup", company=company, title=title, url=url,
                   location=location, workplace=workplace, description=description,
                   salary=item.get("salary") or "", raw=item)
@@ -272,6 +273,9 @@ def assess_apify_leads(items, profile):
             "Rule Score": str(job.score), "Scoring Method": "rules", "Checked At": now_iso(),
             "Verification Error": "", "Employer Job Link": item.get("companyWebsite") or url,
             "Duplicate Listing URLs": "", "Location Variants": "",
+            # People the posting names as hiring contacts (often the founders).
+            "Hiring Contacts": json.dumps([{k: c.get(k) or "" for k in ("name", "title", "url")}
+                                           for c in item.get("hiringContacts") or [] if c.get("name")]),
         }
         focus, evidence = experience_focus(description, years=profile.years)
         row.update({"Experience Focus": focus, "Experience Evidence": evidence})
@@ -491,16 +495,19 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         if not apify_path.exists():
             try:
                 from jobagent.enrich.apify_yc import fetch_yc_jobs
-                # The same few terms return the same postings every day, so
-                # rotate through the configured terms plus the profile's titles.
+                from jobagent.enrich.apify_yc import MAX_QUERIES
+                # A query must match every word, so short terms find the most.
+                # Configured terms plus the profile's short titles; a pool
+                # longer than the actor's 20-query limit rotates daily.
+                short_titles = [t for t in discovery.profile_terms(profile)[0] if len(t.split()) <= 3]
                 pool = [*(apify_cfg.get('queries') or ['QA', 'SDET', 'quality engineer', 'software test engineer']),
-                        *discovery.profile_terms(profile)[0]]
-                # Every matching posting, not a first page. The charge ceiling
-                # only guards against a runaway actor: it covers the whole
-                # item allowance at the published per-job price.
-                items = fetch_yc_jobs(discovery.daily_subset(pool, today, apify_cfg.get('queries_per_day', 5)),
+                        *short_titles]
+                # Every matching posting up to the actor's maximum. The charge
+                # ceiling only guards against a runaway run: it covers the
+                # whole allowance at the published per-job price.
+                items = fetch_yc_jobs(discovery.daily_subset(pool, today, MAX_QUERIES),
                                        max_items=YC_ALL_ITEMS,
-                                       max_total_charge_usd=max(apify_cfg.get('max_total_charge_usd', 0), YC_ALL_ITEMS * 0.0025))
+                                       max_total_charge_usd=max(apify_cfg.get('max_total_charge_usd', 0), YC_ALL_ITEMS * 0.0025 + 0.1))
                 atomic_json(apify_path, {'items': items, 'error': None, 'checked_at': now_iso()})
             except Exception as exc:
                 atomic_json(apify_path, {'items': [], 'error': type(exc).__name__, 'checked_at': now_iso()})
@@ -556,9 +563,37 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         # sent (automatically in auto-send mode) instead of being stranded.
         entry = ledger.get(hashlib.sha256(company_key(row['Company']).encode()).hexdigest()[:24], {})
         return entry.get('state') == 'sent'
+    # Startups of about 10-200 people come first: their founders and CTO
+    # usually hire directly. Size is read once a month per company.
+    from jobagent.outreach import founders
+    email_cfg = cfg.get('founder_emails', {})
+    target = (email_cfg.get('min_employees', 10), email_cfg.get('max_employees', 200))
+    sizes_path = state_dir / 'company-size.json'
+    sizes = read_json(sizes_path, {})
+    size_recheck = discovery.recent_cutoff(today, 30)
+    for company in dict.fromkeys(r['Company'] for r in focus if not contacted(r)):
+        ck = company_key(company)
+        if sizes.get(ck, {}).get('checked', '') >= size_recheck:
+            continue
+        remaining(deadline)
+        try:
+            found_size = founders.company_size(company, exa_search)
+        except Exception as exc:
+            issues.append({'stage': 'company_size', 'company': company, 'error': type(exc).__name__})
+            continue
+        label = found_size.get('Employee Count', '')
+        low, _, high = label.partition('-')
+        sizes[ck] = {**found_size, 'checked': today_iso,
+                     **({'low': int(low), 'high': int(high or low)} if label else {})}
+    atomic_json(sizes_path, sizes)
+    def size_rank(row):
+        known = sizes.get(company_key(row['Company']), {})
+        if 'low' not in known:
+            return 1
+        return 0 if founders.in_target((known['low'], known['high']), *target) else 2
     def freshness(row):
         last = history.get(company_key(row['Company']), {}).get('researched', '')
-        return (contacted(row), cooldown <= last < today_iso,
+        return (contacted(row), cooldown <= last < today_iso, size_rank(row),
                 first_seen.get(canonical(row['Job Link']), today_iso) != today_iso)
     # Previously evidenced startups get first attention; no salary-based bonus.
     focus.sort(key=lambda r: (*freshness(r), not bool(by_company.get(company_key(r['Company']), {}).get('Investment Source')),
@@ -588,6 +623,49 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         else:
             history.setdefault(company_key(key), {})['researched'] = today_iso
     atomic_json(history_path, history)
+    for key, meta in metadata.items():
+        known = sizes.get(company_key(key), {})
+        meta.update({'Employee Count': known.get('Employee Count', ''),
+                     'Employee Count Source': known.get('Employee Count Source', '')})
+    # Verified founder / CTO / CEO emails for 10-200 person startups (and YC
+    # companies whose size is unknown) that research left without an address.
+    lookups_path = state_dir / 'founder-emails.json'
+    lookups = read_json(lookups_path, {})
+    if email_cfg.get('enabled', True):
+        from jobagent.enrich.email_finder import find_emails
+        finder = lambda people: find_emails(people, max_charge_per_run_usd=email_cfg.get('max_charge_per_run_usd', 0.5))
+        recheck = discovery.recent_cutoff(today, email_cfg.get('recheck_days', 30))
+        for row in focus:
+            key, ck = row['Company'].casefold(), company_key(row['Company'])
+            meta = metadata.get(key)
+            if meta is None or meta.get('Public Work Email') or contacted(row):
+                continue
+            yc = row.get('Listing Type', '').startswith('Y Combinator')
+            if not (size_rank(row) == 0 or (yc and size_rank(row) == 1)):
+                continue
+            earlier = lookups.get(ck, {})
+            if earlier.get('checked', '') >= recheck:
+                meta.update(earlier.get('contact') or {})
+                continue
+            remaining(deadline)
+            people = founders.leaders(row, meta, exa_search)
+            domain = founders.company_domain(row['Company'], [s.get('url', '') for s in meta.get('_sources', [])]
+                                             + [row.get('Employer Job Link', '')])
+            try:
+                contact = founders.verified_contact(people, domain, finder) if people and domain else {}
+            except Exception as exc:
+                # Not recorded as checked, so the next run tries again.
+                issues.append({'stage': 'founder_email', 'company': row['Company'], 'error': type(exc).__name__})
+                continue
+            lookups[ck] = {'checked': today_iso, 'domain': domain, 'leaders': [p['name'] for p in people],
+                           'contact': contact}
+            if contact:
+                meta.update(contact)
+                if not meta.get('Manager Name'):
+                    meta.update({'Manager Name': contact['Email Contact Name'], 'Manager Role': contact['Email Contact Role'],
+                                 'Manager Source': contact['Email Source'], 'Manager LinkedIn': contact['Email Contact LinkedIn']})
+                progress(f"Verified email for {contact['Email Contact Role']} at {row['Company']}.")
+        atomic_json(lookups_path, lookups)
     def priority(row):
         meta = metadata.get(row['Company'].casefold(), {})
         backing = 0 if re.fullmatch(r'[WSFX]\d{2,4}', meta.get('YC Batch', '').strip(), re.I) or 'y combinator' in meta.get('Investor Backing', '').lower() else 1 if meta.get('Investment Source') else 2
@@ -627,6 +705,9 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                'full_jds_omitted_from_display': max(0, len(all_rows)-len(selected)),
                'drafts': len(roles), 'reused_drafts': reused, 'companies_researched': len(metadata),
                'new_contacts': new_contacts, 'boards_added': len(boards_added),
+               'companies_10_to_200_employees': sum(size_rank({'Company': c}) == 0 for c in {r['Company'] for r in focus}),
+               'verified_founder_emails': sum(bool((m.get('Email Ownership Status') or '').startswith('Verified deliverable'))
+                                              for m in metadata.values()),
                'companies_found_in_news': len(growth.get('companies', [])),
                'search_queries': found.get('queries', []) + growth.get('queries', []),
                'public_emails': sum(bool(r.get('Public Work Email')) for r in roles),
