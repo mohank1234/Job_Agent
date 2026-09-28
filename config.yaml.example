@@ -61,11 +61,16 @@ morning:
   # clearpath/email-finder-api verifies the mailbox deliverable and safe to
   # send on the company's own domain ($0.005/run + $0.008 per pattern
   # tested, one person at a time, results kept for recheck_days).
+  # Free option: with a HUNTER_API_KEY (hunter.io free plan, no card) the
+  # verified email comes from Hunter's Email Finder instead, capped at
+  # hunter_monthly_limit searches and stopped by Hunter's own usage count;
+  # only addresses Hunter marks "valid" are used. Best companies go first.
   founder_emails:
     enabled: true
     min_employees: 10
     max_employees: 200
     recheck_days: 30
+    hunter_monthly_limit: 25
     max_charge_per_run_usd: 0.5
   # Y Combinator's "Work at a Startup" board (1,000+ live postings) has no
   # public API of its own, unlike companies.yaml's board slugs. This calls a

@@ -8,5 +8,6 @@ def offline_sources(monkeypatch):
     from jobagent.enrich import exa
     from jobagent.sources import hn_hiring
     monkeypatch.setattr(hn_hiring, "latest_posts", lambda *a, **k: [])
+    monkeypatch.delenv("HUNTER_API_KEY", raising=False)
     yield
     exa.configure_budget(None, None)

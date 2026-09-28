@@ -666,11 +666,17 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     lookups_path = state_dir / 'founder-emails.json'
     lookups = read_json(lookups_path, {})
     if email_cfg.get('enabled', True):
+        from jobagent.enrich import hunter
         from jobagent.enrich.email_finder import find_emails
-        # Without paid services the leaders are still found (names, roles,
-        # LinkedIn), only the paid mailbox verification is skipped.
-        finder = ((lambda people: find_emails(people, max_charge_per_run_usd=email_cfg.get('max_charge_per_run_usd', 0.5)))
-                  if allow_paid else (lambda people: {}))
+        # Hunter's free plan (capped, never billed) when its key is present;
+        # the paid Apify verifier only with paid services allowed. Without
+        # either, leaders are still named (greeting, LinkedIn), with no email.
+        if hunter.api_key():
+            finder = hunter.make_finder(state_dir / 'hunter-usage.json', email_cfg.get('hunter_monthly_limit', 25))
+        elif allow_paid:
+            finder = lambda people: find_emails(people, max_charge_per_run_usd=email_cfg.get('max_charge_per_run_usd', 0.5))
+        else:
+            finder = None
         recheck = discovery.recent_cutoff(today, email_cfg.get('recheck_days', 30))
         for row in focus:
             key, ck = row['Company'].casefold(), company_key(row['Company'])
@@ -694,15 +700,18 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                              'Manager LinkedIn': lead['url'] if 'linkedin.com/in/' in lead['url'] else ''})
             if earlier.get('checked', '') >= recheck:
                 meta.update(earlier.get('contact') or {})
-            elif allow_paid:
+            elif finder is not None:
                 domain = founders.company_domain(row['Company'], [s.get('url', '') for s in meta.get('_sources', [])]
                                                  + [row.get('Employer Job Link', '')])
                 try:
                     contact = founders.verified_contact(people, domain, finder) if people and domain else {}
                 except Exception as exc:
                     # Not recorded as checked, so the next run tries again.
-                    issues.append({'stage': 'founder_email', 'company': row['Company'], 'error': type(exc).__name__})
+                    issues.append({'stage': 'founder_email', 'company': row['Company'], 'error': getattr(exc, 'kind', type(exc).__name__)})
                     contact = None
+                    if getattr(exc, 'kind', '') == 'free_limit_reached':
+                        progress('Free email-lookup allowance used for this month; remaining companies keep a named leader only.')
+                        finder = None
                 if contact is not None:
                     earlier.update(checked=today_iso, domain=domain, contact=contact)
                     meta.update(contact)

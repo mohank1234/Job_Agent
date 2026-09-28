@@ -166,11 +166,14 @@ jobs:
       - name: Run morning pipeline
         id: morning
         if: github.event.inputs.validate_only != 'true'
-        # Only the free-credit web search key is given to the run. The Apify,
+        # Only free-plan keys are given to the run: Exa (held inside its free
+        # credit) and Hunter.io (free plan, capped at 25 searches a month;
+        # optional, add the HUNTER_API_KEY secret to enable it). The Apify,
         # Gemini and Firecrawl keys are deliberately absent, so no code path
         # can reach a paid service.
         env:
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
           FORCE_RUN: ${{ github.event.inputs.force_run }}
           PYTHONIOENCODING: utf-8
         run: |
