@@ -110,9 +110,10 @@ def company_key(name):
     return re.sub(r"[^a-z0-9]", "", name.casefold())
 
 
-def extract_companies(provider, results, limit=40):
+def extract_companies(provider, results, limit=40, max_prompt_chars=None):
     """Company names from news/list pages; each must appear in its source."""
-    sources = [{"url": r["url"], "title": r.get("title", ""), "text": r.get("snippet", "")} for r in results]
+    share = max(300, max_prompt_chars // max(1, len(results))) if max_prompt_chars else None
+    sources = [{"url": r["url"], "title": r.get("title", ""), "text": r.get("snippet", "")[:share]} for r in results]
     if not sources or provider is None:
         return []
     import json

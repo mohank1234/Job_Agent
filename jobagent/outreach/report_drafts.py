@@ -157,10 +157,9 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                               **{'Sent At':entry.get('sent_at',''), 'Sent Message URL':entry.get('sent_message_url','')})
                 results.append(result)
                 continue
-            if not to:
-                result.update(Status='Pending contact research; saved in Excel only', Recipient='')
-                results.append(result)
-                continue
+            # Every outreach email becomes a Gmail draft. Without a sourced
+            # address the To line stays blank for you to fill in; such a draft
+            # is never sent automatically (auto-send below requires `to`).
             if not resume_meta and re.search(r'\b(?:attached\s+(?:my\s+)?resume|resume\s+is\s+attached)\b', body, re.I):
                 result['Status'] = 'Withheld: email mentions an attachment but no resume is configured'
                 results.append(result)

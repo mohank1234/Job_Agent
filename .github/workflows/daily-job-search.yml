@@ -110,14 +110,57 @@ jobs:
           print('Outreach drafts only; automatic sends and follow-ups disabled for this run.')
           PY
 
+      # Zero cost: the AI model runs on this GitHub machine (free for a public
+      # repository) instead of a hosted API, and pay-per-use services are off.
+      - name: Cache the local AI model
+        if: github.event.inputs.validate_only != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-models-qwen2.5-3b-v1
+
+      - name: Start the local AI model (Ollama)
+        if: github.event.inputs.validate_only != 'true'
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          sudo systemctl stop ollama 2>/dev/null || true
+          nohup ollama serve > ollama.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:11434/api/tags > /dev/null && break; sleep 1; done
+          ollama pull qwen2.5:3b
+          ollama list
+
+      - name: Use free services only
+        if: github.event.inputs.validate_only != 'true'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          path = Path('config.yaml')
+          config = yaml.safe_load(path.read_text(encoding='utf-8'))
+          config['llm'] = {**(config.get('llm') or {}), 'provider': 'ollama', 'model': 'qwen2.5:3b',
+                           'fallback_models': [], 'base_url': 'http://localhost:11434', 'think': None,
+                           'num_ctx': 8192, 'max_tokens': 1500, 'timeout_seconds': 900,
+                           'research_timeout_seconds': 300, 'max_prompt_chars': 16000,
+                           'free_models_only': True, 'free_providers': ['ollama']}
+          config.setdefault('billing', {})['allow_paid_services'] = False
+          morning = config.setdefault('morning', {})
+          # Web search is held inside Exa's free monthly credit; spend it on
+          # the rotating profile searches rather than the same fixed ones.
+          morning['discovery_queries'] = []
+          morning.setdefault('rotating_queries', 4)
+          morning.setdefault('growth_queries', 2)
+          path.write_text(yaml.safe_dump(config, sort_keys=False), encoding='utf-8')
+          print('Free-only: local Ollama model, no paid services, web search within free credit.')
+          PY
+
       - name: Run morning pipeline
         id: morning
         if: github.event.inputs.validate_only != 'true'
+        # Only the free-credit web search key is given to the run. The Apify,
+        # Gemini and Firecrawl keys are deliberately absent, so no code path
+        # can reach a paid service.
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
-          APIFY_API_KEY: ${{ secrets.APIFY_API_KEY }}
           FORCE_RUN: ${{ github.event.inputs.force_run }}
           PYTHONIOENCODING: utf-8
         run: |

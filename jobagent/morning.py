@@ -402,6 +402,16 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     issues = []
     state_dir = run_dir.parent
     today = datetime.now(IST).date()
+    # Zero-cost by default: pay-per-use services (the Apify actors) run only
+    # when billing.allow_paid_services is true, and web search is held inside
+    # Exa's free monthly credit.
+    billing = config.get('billing', {})
+    allow_paid = bool(billing.get('allow_paid_services', False))
+    from jobagent.enrich import exa
+    exa.configure_budget(state_dir / 'exa-usage.json', None if allow_paid else billing.get('exa_monthly_limit_usd', 8.0))
+    if not allow_paid:
+        progress('Free-only mode: paid services (Apify YC search, email verification) are off; '
+                 'web search stays inside the free monthly credit.')
     llm_base = config.get('llm', {})
     # A research prompt carries up to ~120k characters of source pages; hosted
     # models measured 30-60 seconds on those, so a shorter cap abandoned calls
@@ -447,7 +457,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         if results and provider is None:
             errors.append('NoLanguageModel')
         try:
-            names = discovery.extract_companies(provider, results)
+            names = discovery.extract_companies(provider, results, max_prompt_chars=llm_base.get('max_prompt_chars'))
         except Exception as exc:
             errors.append(type(exc).__name__)
         leads_path = state_dir / 'company-leads.json'
@@ -467,9 +477,21 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     company_key = lambda name: re.sub(r'[^a-z0-9]', '', name.casefold())
     by_company = {company_key(r['Company']): r for r in [*seeds['roles'], *old['roles']]}
     reviewed = read_json(ROOT / cfg['reviewed_contacts_file'], {}) if cfg.get('reviewed_contacts_file') else {}
+    hn_path = run_dir / 'hn-hiring.json'
+    if not hn_path.exists():
+        from jobagent.sources import hn_hiring
+        try:
+            atomic_json(hn_path, {'posts': hn_hiring.latest_posts(), 'error': None})
+        except Exception as exc:
+            atomic_json(hn_path, {'posts': [], 'error': type(exc).__name__})
+    hn = read_json(hn_path, {'posts': []})
+    if hn.get('error'):
+        issues.append({'stage': 'hn_who_is_hiring', 'error': hn['error']})
+    hn_posts = hn.get('posts', [])
     watched = read_json(run_dir.parent / 'discovered-boards.json', [])
     urls = [r['url'] for r in found.get('results', [])]
     urls += growth.get('boards', [])
+    urls += [u for p in hn_posts for u in p.get('boards', [])]
     urls += [r['Job Link'] for r in old['roles']]
     urls += watched
     directory = board_directory(yaml.safe_load((ROOT / 'companies.yaml').read_text(encoding='utf-8')), urls)
@@ -489,7 +511,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     remaining(deadline)
     all_rows = assess_boards(coverage, profile)
     apify_cfg = cfg.get('apify_yc', {})
-    if apify_cfg.get('enabled'):
+    if apify_cfg.get('enabled') and allow_paid:
         remaining(deadline)
         apify_path = run_dir / 'apify-yc.json'
         if not apify_path.exists():
@@ -610,7 +632,8 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
             break
         remaining(deadline)
         progress(f'Researching public leadership and investor evidence: {row["Company"]}')
-        metadata[key] = research_company(row, run_dir / 'companies', provider, seed=by_company.get(company_key(key)), deadline=deadline)
+        metadata[key] = research_company(row, run_dir / 'companies', provider, seed=by_company.get(company_key(key)),
+                                         deadline=deadline, max_prompt_chars=llm_base.get('max_prompt_chars'))
         from jobagent.outreach.daily_research import apply_reviewed_contact
         metadata[key] = apply_reviewed_contact(metadata[key], reviewed.get(company_key(key)))
         issues += [{'stage': 'company_research', 'company': row['Company'], 'error': e} for e in metadata[key].get('_errors', [])]
@@ -627,13 +650,27 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
         known = sizes.get(company_key(key), {})
         meta.update({'Employee Count': known.get('Employee Count', ''),
                      'Employee Count Source': known.get('Employee Count Source', '')})
+    # Free: an address the company itself published for applicants in a
+    # Hacker News "Who is hiring?" post.
+    from jobagent.sources import hn_hiring
+    for row in focus:
+        meta = metadata.get(row['Company'].casefold())
+        if meta is not None and not meta.get('Public Work Email'):
+            ref = board_ref(row.get('Job Link', ''))
+            contact = hn_hiring.contact_for(row['Company'], [ref[1]] if ref else [], hn_posts)
+            if contact:
+                meta.update(contact, **{'Email Ownership Checked At': now_iso()})
+                progress(f"Hiring email published by {row['Company']} on Hacker News: {contact['Public Work Email']}")
     # Verified founder / CTO / CEO emails for 10-200 person startups (and YC
     # companies whose size is unknown) that research left without an address.
     lookups_path = state_dir / 'founder-emails.json'
     lookups = read_json(lookups_path, {})
     if email_cfg.get('enabled', True):
         from jobagent.enrich.email_finder import find_emails
-        finder = lambda people: find_emails(people, max_charge_per_run_usd=email_cfg.get('max_charge_per_run_usd', 0.5))
+        # Without paid services the leaders are still found (names, roles,
+        # LinkedIn), only the paid mailbox verification is skipped.
+        finder = ((lambda people: find_emails(people, max_charge_per_run_usd=email_cfg.get('max_charge_per_run_usd', 0.5)))
+                  if allow_paid else (lambda people: {}))
         recheck = discovery.recent_cutoff(today, email_cfg.get('recheck_days', 30))
         for row in focus:
             key, ck = row['Company'].casefold(), company_key(row['Company'])
@@ -644,27 +681,34 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
             if not (size_rank(row) == 0 or (yc and size_rank(row) == 1)):
                 continue
             earlier = lookups.get(ck, {})
+            if earlier.get('leaders_checked', '') >= recheck:
+                people = earlier.get('people', [])
+            else:
+                remaining(deadline)
+                people = founders.leaders(row, meta, exa_search)
+                earlier.update(leaders_checked=today_iso, people=people)
+            lead = next((p for p in people if (p.get('source') or '').startswith('http')), None)
+            if lead and not meta.get('Manager Name'):
+                # Name and role for the greeting and LinkedIn note, even with no email.
+                meta.update({'Manager Name': lead['name'], 'Manager Role': lead['title'], 'Manager Source': lead['source'],
+                             'Manager LinkedIn': lead['url'] if 'linkedin.com/in/' in lead['url'] else ''})
             if earlier.get('checked', '') >= recheck:
                 meta.update(earlier.get('contact') or {})
-                continue
-            remaining(deadline)
-            people = founders.leaders(row, meta, exa_search)
-            domain = founders.company_domain(row['Company'], [s.get('url', '') for s in meta.get('_sources', [])]
-                                             + [row.get('Employer Job Link', '')])
-            try:
-                contact = founders.verified_contact(people, domain, finder) if people and domain else {}
-            except Exception as exc:
-                # Not recorded as checked, so the next run tries again.
-                issues.append({'stage': 'founder_email', 'company': row['Company'], 'error': type(exc).__name__})
-                continue
-            lookups[ck] = {'checked': today_iso, 'domain': domain, 'leaders': [p['name'] for p in people],
-                           'contact': contact}
-            if contact:
-                meta.update(contact)
-                if not meta.get('Manager Name'):
-                    meta.update({'Manager Name': contact['Email Contact Name'], 'Manager Role': contact['Email Contact Role'],
-                                 'Manager Source': contact['Email Source'], 'Manager LinkedIn': contact['Email Contact LinkedIn']})
-                progress(f"Verified email for {contact['Email Contact Role']} at {row['Company']}.")
+            elif allow_paid:
+                domain = founders.company_domain(row['Company'], [s.get('url', '') for s in meta.get('_sources', [])]
+                                                 + [row.get('Employer Job Link', '')])
+                try:
+                    contact = founders.verified_contact(people, domain, finder) if people and domain else {}
+                except Exception as exc:
+                    # Not recorded as checked, so the next run tries again.
+                    issues.append({'stage': 'founder_email', 'company': row['Company'], 'error': type(exc).__name__})
+                    contact = None
+                if contact is not None:
+                    earlier.update(checked=today_iso, domain=domain, contact=contact)
+                    meta.update(contact)
+                    if contact:
+                        progress(f"Verified email for {contact['Email Contact Role']} at {row['Company']}.")
+            lookups[ck] = earlier
         atomic_json(lookups_path, lookups)
     def priority(row):
         meta = metadata.get(row['Company'].casefold(), {})

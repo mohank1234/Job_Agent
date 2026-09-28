@@ -17,6 +17,15 @@
 
 profile_file: profile.yaml
 
+# Zero cost by default. Pay-per-use services (the Apify YC search and the
+# email verifier) run only when allow_paid_services is true. Exa web search
+# is held under exa_monthly_limit_usd, inside its free $10 monthly credit,
+# spread evenly over the days left in the month. The GitHub workflow also
+# forces these settings and never passes the paid services' keys to the run.
+billing:
+  allow_paid_services: false
+  exa_monthly_limit_usd: 8.0
+
 # Public employer-board scan and outreach drafts; never sends messages.
 morning:
   workers: 6
@@ -93,6 +102,11 @@ llm:
   think: low                # gpt-oss: low|medium|high; other models: true/false
   num_ctx: 16384            # context window; 4 JDs + profile fit comfortably
   keep_alive: 30m           # keep the model loaded between batches
+  # Research and news-extraction requests are trimmed to this many characters
+  # (source texts shortened evenly) so they fit the context window. About 3.5
+  # characters per token: 48000 suits num_ctx 16384. The GitHub run uses a
+  # small CPU model (qwen2.5:3b, num_ctx 8192) with 16000.
+  max_prompt_chars: 48000
 
   # Tried in order if the primary errors. Models not installed are skipped.
   fallback_models: []

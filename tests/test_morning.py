@@ -317,7 +317,8 @@ def test_daily_work_finds_verified_cto_email_for_small_startup(tmp_path, monkeyp
     profile.raw['identity']['experience']['years'] = 5
     out, state = project/'out', project/'state'
     (state/'2026-09-28').mkdir(parents=True)
-    summary = morning.daily_work({'morning':{}}, profile, out, state/'2026-09-28', progress=lambda *a:None)
+    paid = {'morning':{}, 'billing':{'allow_paid_services': True}}
+    summary = morning.daily_work(paid, profile, out, state/'2026-09-28', progress=lambda *a:None)
     assert finder_calls == [[{'firstName': 'Cai', 'surname': 'Tech', 'domain': 'beta.io'}]]
     rows = list(__import__('csv').DictReader((out/'Startup Outreach.csv').open(encoding='utf-8-sig')))
     assert rows[0]['Public Work Email'] == 'cai@beta.io' and rows[0]['Employee Count'] == '11-50'
@@ -326,8 +327,15 @@ def test_daily_work_finds_verified_cto_email_for_small_startup(tmp_path, monkeyp
     assert summary['companies_10_to_200_employees'] == 1
     # A second run the same month reuses the lookup instead of paying again.
     (state/'2026-09-29').mkdir()
-    morning.daily_work({'morning':{}}, profile, out, state/'2026-09-29', progress=lambda *a:None)
+    morning.daily_work(paid, profile, out, state/'2026-09-29', progress=lambda *a:None)
     assert len(finder_calls) == 1
+    # Free-only (the default): no paid lookup, but the CTO is still named.
+    (state/'founder-emails.json').unlink()
+    (state/'2026-09-30').mkdir()
+    morning.daily_work({'morning':{}}, profile, out, state/'2026-09-30', progress=lambda *a:None)
+    assert len(finder_calls) == 1
+    rows = list(__import__('csv').DictReader((out/'Startup Outreach.csv').open(encoding='utf-8-sig')))
+    assert rows[0]['Public Work Email'] == '' and rows[0]['Manager Name'] == 'Cai Tech'
 
 
 def test_failed_research_is_retried_not_cached(tmp_path):
