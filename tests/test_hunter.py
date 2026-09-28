@@ -81,6 +81,46 @@ def test_usage_limit_response_stops_and_not_found_is_free(tmp_path):
         finder([PERSON])
 
 
+DOMAIN_SEARCH = {"data": {"domain": "beta.io", "organization": "Beta", "emails": [
+    {"value": "ana@beta.io", "first_name": "Ana", "last_name": "Boss", "position": "CEO", "confidence": 97,
+     "verification": {"status": "valid"}, "linkedin": "https://www.linkedin.com/in/ana",
+     "sources": [{"uri": "https://beta.io/team"}]},
+    {"value": "cai@beta.io", "first_name": "Cai", "last_name": "Tech", "position": "Co-founder & CTO", "confidence": 95,
+     "verification": {"status": "valid"}, "linkedin": "", "sources": []},
+    {"value": "sam@beta.io", "first_name": "Sam", "last_name": "Ops", "position": "Chief Operating Officer",
+     "verification": {"status": "valid"}, "sources": []},
+    {"value": "dee@beta.io", "first_name": "Dee", "last_name": "Found", "position": "Founder",
+     "verification": {"status": "accept_all"}, "sources": []}]}}
+
+
+def test_domain_search_picks_verified_cto_first(tmp_path):
+    get, calls = fake_hunter([Response(200, DOMAIN_SEARCH)])
+    people = hunter.executives("Beta", "", tmp_path / "u.json", get=get)
+    assert calls == ["account", "domain-search"]
+    assert json.loads((tmp_path / "u.json").read_text())["searches"] == 1
+    contact = founders.contact_from_executives("beta", people, domain_given=False)
+    assert contact["Public Work Email"] == "cai@beta.io" and contact["Email Contact Role"] == "Co-founder & CTO"
+    assert contact["Email Source"] == "https://beta.io"
+    from jobagent.outreach.report_drafts import draft_recipient
+    assert draft_recipient(contact) == "cai@beta.io"
+
+
+def test_domain_search_by_name_rejects_a_different_organisation(tmp_path):
+    other = json.loads(json.dumps(DOMAIN_SEARCH))
+    other["data"]["organization"] = "Gamma Holdings"
+    get, _ = fake_hunter([Response(200, other)])
+    people = hunter.executives("Beta", "", tmp_path / "u.json", get=get)
+    assert founders.contact_from_executives("beta", people, domain_given=False) == {}
+    # With the company's own website given, the domain itself is the match.
+    assert founders.contact_from_executives("beta", people, domain_given=True)["Public Work Email"] == "cai@beta.io"
+
+
+def test_empty_domain_search_uses_no_credit(tmp_path):
+    get, _ = fake_hunter([Response(200, {"data": {"domain": "beta.io", "emails": []}})])
+    assert hunter.executives("Beta", "beta.io", tmp_path / "u.json", get=get) == []
+    assert not (tmp_path / "u.json").exists()
+
+
 def test_hunter_result_becomes_a_sendable_contact(tmp_path):
     get, _ = fake_hunter([Response(200, {"data": {"email": "cai@beta.io", "score": 96, "verification": {"status": "valid"}}})])
     people = [{"name": "Cai Tech", "title": "Co-founder & CTO", "url": "https://www.linkedin.com/in/cai",

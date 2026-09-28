@@ -159,6 +159,37 @@ def split_name(name):
     return (parts[0], parts[-1]) if len(parts) >= 2 else None
 
 
+def contact_from_executives(company, executives, *, domain_given):
+    """The best verified founder/CTO/CEO from a Hunter Domain Search.
+    Searched by name only, Hunter's organisation must match the company."""
+    wanted = key(plain_name(company))
+    best = None
+    for person in executives:
+        domain = person.get("domain", "")
+        organization = key(person.get("organization", ""))
+        if not domain_given and not (len(wanted) >= 3 and organization
+                                     and (organization.startswith(wanted) or wanted.startswith(organization))):
+            continue
+        if not (person.get("verified") and person.get("name") and LEADER.search(person.get("title", ""))
+                and person.get("email", "").lower().endswith("@" + domain)):
+            continue
+        if best is None or rank(person["title"]) < rank(best["title"]):
+            best = person
+    if not best:
+        return {}
+    linkedin = best["linkedin"] if best["linkedin"].startswith("http") else ""
+    source = best["source"] or linkedin or f"https://{best['domain']}"
+    return {
+        "Public Work Email": best["email"], "Email Source": source,
+        "Email Contact Name": best["name"], "Email Contact Role": best["title"],
+        "Email Contact LinkedIn": linkedin if "linkedin.com/in/" in linkedin else "",
+        "Email Evidence": (f"Hunter Domain Search: verified deliverable ({best['organization'] or best['domain']}, "
+                           f"confidence {best.get('confidence', 'n/a')}); first public source {source}"),
+        "Email Ownership Status": "Verified deliverable mailbox; listed by Hunter from public sources",
+        "Email Ownership Checked At": now_iso(),
+    }
+
+
 def verified_contact(people, domain, finder):
     """The best-ranked leader with a verified address on the company domain."""
     wanted = []

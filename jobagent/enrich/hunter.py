@@ -55,6 +55,57 @@ def account_searches_left(key, get=httpx.get):
     return min(left) if left else None
 
 
+def _spend_check(usage_path, monthly_limit, key, get):
+    usage = _usage(usage_path)
+    if usage["searches"] >= monthly_limit:
+        raise HunterError("free_limit_reached", f"Hunter free searches used for {usage['month']}")
+    left = account_searches_left(key, get)
+    if left is not None and left <= 0:
+        raise HunterError("free_limit_reached", "Hunter reports no searches left this month")
+    return usage
+
+
+def _count(usage_path, usage):
+    usage["searches"] += 1
+    Path(usage_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(usage_path).write_text(json.dumps(usage), encoding="utf-8")
+
+
+def executives(company, domain, usage_path, monthly_limit=50, get=httpx.get):
+    """Domain Search for a company's executives: [{name, title, email, verified,
+    linkedin, source, domain}]. Uses one credit only when people come back.
+    Works from the company name alone when its website is unknown."""
+    key = api_key()
+    usage = _spend_check(usage_path, monthly_limit, key, get)
+    params = {"api_key": key, "seniority": "executive", "type": "personal", "limit": 10}
+    params.update({"domain": domain} if domain else {"company": company})
+    try:
+        resp = get(f"{API}/domain-search", params=params, timeout=TIMEOUT)
+        if resp.status_code == 429:
+            raise HunterError("free_limit_reached", "Hunter usage limit reached")
+        if resp.status_code in (400, 404):
+            return []
+        resp.raise_for_status()
+        data = resp.json().get("data") or {}
+    except HunterError:
+        raise
+    except Exception as exc:
+        raise classify_http_error(exc, "Hunter") from exc
+    emails = data.get("emails") or []
+    if emails:
+        _count(usage_path, usage)
+    found_domain = (data.get("domain") or domain or "").lower()
+    people = []
+    for e in emails:
+        name = " ".join(p for p in (e.get("first_name"), e.get("last_name")) if p)
+        source = next((s.get("uri") for s in e.get("sources") or [] if (s.get("uri") or "").startswith("http")), "")
+        people.append({"name": name, "title": e.get("position") or "", "email": e.get("value") or "",
+                       "verified": (e.get("verification") or {}).get("status") == "valid",
+                       "linkedin": e.get("linkedin") or "", "source": source, "domain": found_domain,
+                       "organization": data.get("organization") or "", "confidence": e.get("confidence")})
+    return people
+
+
 def make_finder(usage_path, monthly_limit=50, get=httpx.get):
     """A finder for founders.verified_contact(): [{firstName, surname, domain}]
     -> {(first, last): {email, validationStatus, overallScore}}; verified only."""
@@ -63,12 +114,7 @@ def make_finder(usage_path, monthly_limit=50, get=httpx.get):
     def finder(people):
         found = {}
         for person in people:
-            usage = _usage(usage_path)
-            if usage["searches"] >= monthly_limit:
-                raise HunterError("free_limit_reached", f"Hunter free searches used for {usage['month']}")
-            left = account_searches_left(key, get)
-            if left is not None and left <= 0:
-                raise HunterError("free_limit_reached", "Hunter reports no searches left this month")
+            usage = _spend_check(usage_path, monthly_limit, key, get)
             try:
                 resp = get(f"{API}/email-finder", timeout=TIMEOUT,
                            params={"domain": person["domain"], "first_name": person["firstName"],
@@ -85,9 +131,7 @@ def make_finder(usage_path, monthly_limit=50, get=httpx.get):
                 raise classify_http_error(exc, "Hunter") from exc
             if data.get("email"):
                 # Counted only when an email came back: that is when Hunter charges.
-                usage["searches"] += 1
-                Path(usage_path).parent.mkdir(parents=True, exist_ok=True)
-                Path(usage_path).write_text(json.dumps(usage), encoding="utf-8")
+                _count(usage_path, usage)
             status = (data.get("verification") or {}).get("status")
             if data.get("email") and status == "valid":
                 found[(person["firstName"].casefold(), person["surname"].casefold())] = {

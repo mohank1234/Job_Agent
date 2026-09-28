@@ -692,7 +692,9 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
             else:
                 remaining(deadline)
                 people = founders.leaders(row, meta, exa_search)
-                earlier.update(leaders_checked=today_iso, people=people)
+                # An empty result may only mean search was paused; ask again next run.
+                if people:
+                    earlier.update(leaders_checked=today_iso, people=people)
             lead = next((p for p in people if (p.get('source') or '').startswith('http')), None)
             if lead and not meta.get('Manager Name'):
                 # Name and role for the greeting and LinkedIn note, even with no email.
@@ -704,7 +706,17 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                 domain = founders.company_domain(row['Company'], [s.get('url', '') for s in meta.get('_sources', [])]
                                                  + [row.get('Employer Job Link', '')])
                 try:
-                    contact = founders.verified_contact(people, domain, finder) if people and domain else {}
+                    contact = {}
+                    if hunter.api_key():
+                        # One Domain Search lists the company's executives with
+                        # verified emails; it needs no name, and no website
+                        # either (the company name is enough).
+                        executives = hunter.executives(founders.plain_name(row['Company']), domain,
+                                                       state_dir / 'hunter-usage.json',
+                                                       email_cfg.get('hunter_monthly_limit', 50))
+                        contact = founders.contact_from_executives(row['Company'], executives, domain_given=bool(domain))
+                    if not contact and people and domain:
+                        contact = founders.verified_contact(people, domain, finder)
                 except Exception as exc:
                     # Not recorded as checked, so the next run tries again.
                     issues.append({'stage': 'founder_email', 'company': row['Company'], 'error': getattr(exc, 'kind', type(exc).__name__)})
