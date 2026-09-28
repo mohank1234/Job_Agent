@@ -1,9 +1,9 @@
-"""Check the Hunter and Apollo keys without spending any credit.
+"""Check the email-provider keys without spending any credit.
 
+Prospeo: POST /account-information (free) reports plan and credits left.
 Hunter: GET /v2/account is free and reports the plan and its remaining
-credits. Apollo: one People API Search (0 credits per Apollo's docs) for a
-public domain shows whether the key, its endpoint access and the plan allow
-API use. People Enrichment (the credit-using call) is not made here.
+credits. Tomba: GET /v1/me (free) confirms the key pair. Apollo: one People
+API Search (0 credits per Apollo's docs). No email lookup is made here.
 Prints results only; never prints the keys.
 """
 from __future__ import annotations
@@ -57,6 +57,37 @@ def check_apollo():
     return f"Apollo: not usable (HTTP {resp.status_code}: {hints.get(resp.status_code, 'unexpected response')}). {detail}"
 
 
+def check_prospeo():
+    key = os.environ.get("PROSPEO_API_KEY", "").strip()
+    if not key:
+        return "Prospeo: no PROSPEO_API_KEY secret; Prospeo is off."
+    resp = httpx.post("https://api.prospeo.io/account-information", timeout=30,
+                      headers={"X-KEY": key, "Content-Type": "application/json"})
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    if resp.status_code != 200 or data.get("error"):
+        return f"Prospeo: key not usable (HTTP {resp.status_code}): {str(data)[:200]}"
+    info = data.get("response") or data
+    return (f"Prospeo: OK - plan {info.get('current_plan', '?')}; {info.get('remaining_credits', '?')} credits left"
+            f"{'; renews ' + str(info.get('next_quota_renewal_date')) if info.get('next_quota_renewal_date') else ''}.")
+
+
+def check_tomba():
+    key, secret = os.environ.get("TOMBA_API_KEY", "").strip(), os.environ.get("TOMBA_SECRET", "").strip()
+    if not (key and secret):
+        return "Tomba: TOMBA_API_KEY and TOMBA_SECRET secrets not both set; Tomba is off."
+    resp = httpx.get("https://api.tomba.io/v1/me", timeout=30, headers={"X-Tomba-Key": key, "X-Tomba-Secret": secret})
+    try:
+        data = (resp.json() or {}).get("data") or {}
+    except ValueError:
+        data = {}
+    if resp.status_code != 200:
+        return f"Tomba: keys not usable (HTTP {resp.status_code}): {resp.text[:200]}"
+    return f"Tomba: OK - account {'found' if data else 'response received'}; usage details: {str(data.get('requests') or data.get('usage') or '')[:160]}"
+
+
 def check_apollo_enrichment():
     """One People Enrichment lookup by name + domain (uses 1 free credit if a
     match is returned; the free plan cannot bill). Only run on request."""
@@ -84,7 +115,7 @@ def check_apollo_enrichment():
 
 
 if __name__ == "__main__":
-    checks = [check_hunter(), check_apollo()]
+    checks = [check_prospeo(), check_hunter(), check_tomba(), check_apollo()]
     if "--apollo-enrichment" in sys.argv:
         checks.append(check_apollo_enrichment())
     for line in checks:

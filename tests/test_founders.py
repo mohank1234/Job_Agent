@@ -42,14 +42,25 @@ def test_profile_leaders_need_a_leader_headline_naming_the_company():
     assert [p["name"] for p in found] == ["Nick Camara"]
 
 
-def test_leaders_rank_cto_then_founder_then_ceo_and_merge_sources():
+def test_leaders_follow_the_contact_order_and_merge_sources():
+    # Founder > Co-founder > CEO > CTO > VP/Head of Engineering > Head of QA > Engineering Manager.
     row = {"Company": "Acme", "Job Link": "https://www.workatastartup.com/jobs/1",
-           "Hiring Contacts": json.dumps([{"name": "Ana CEO", "title": "CEO", "url": ""},
+           "Hiring Contacts": json.dumps([{"name": "Ana Boss", "title": "CEO", "url": ""},
                                           {"name": "Ben Builder", "title": None, "url": ""},
-                                          {"name": "Recruiter Rae", "title": "Recruiter", "url": ""}])}
+                                          {"name": "Recruiter Rae", "title": "Recruiter", "url": ""},
+                                          {"name": "Fay First", "title": "Co-founder", "url": ""}])}
     meta = {"Manager Name": "Cai Tech", "Manager Role": "CTO", "Manager Source": "https://acme.com/team"}
     names = [p["name"] for p in founders.leaders(row, meta)]
-    assert names[0] == "Cai Tech" and "Ana CEO" in names and "Recruiter Rae" not in names
+    assert names == ["Fay First", "Ana Boss", "Cai Tech"]
+
+
+@pytest.mark.parametrize("title, position", [
+    ("Founder & CEO", 0), ("Co-Founder & CTO", 1), ("CEO", 2), ("Chief Technology Officer", 3),
+    ("VP Engineering", 4), ("Head of QA", 5), ("Engineering Manager", 6), ("Director of Software", 7),
+    ("Founding Engineer", founders.NOT_A_LEADER), ("Recruiter", founders.NOT_A_LEADER),
+])
+def test_contact_order(title, position):
+    assert founders.rank(title) == position
 
 
 def test_company_domain_uses_the_companys_own_site():

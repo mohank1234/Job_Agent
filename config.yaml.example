@@ -70,7 +70,18 @@ morning:
     min_employees: 10
     max_employees: 200
     recheck_days: 30
+    # Email waterfall, one decision-maker per company (Founder > Co-founder >
+    # CEO > CTO > VP/Head of Engineering > Head of QA > Engineering Manager),
+    # stopping at the first address found:
+    #   1 COMPANY_WEBSITE  published on the company's own site (free, no guessing)
+    #   2 PROSPEO          PROSPEO_API_KEY; needs the person's name; charged only when found
+    #   3 HUNTER           HUNTER_API_KEY; Email Finder for a named person, else one Domain Search
+    #   4 TOMBA            TOMBA_API_KEY + TOMBA_SECRET; needs the name; every call counted
+    #   NO_VERIFIED_EMAIL  nothing verified; retried after recheck_empty_days
+    # Each provider has a monthly cap and an even daily share of what is left.
+    prospeo_monthly_limit: 100
     hunter_monthly_limit: 50       # the free plan's monthly credits
+    tomba_monthly_limit: 25
     recheck_empty_days: 7          # "no verified email found" is retried after this
     # Optional: APOLLO_API_KEY (free plan, work-email account). People search
     # is free; only the best-ranked leader is revealed, capped here.

@@ -16,7 +16,7 @@ from jobagent.outreach.verification import canonical, csv_text
 from jobagent.runtime import now_iso
 
 TRACKER_FIELDS = [
-    "Domain", "Website", "Startup Source", "Team Size", "Region", "Remote Status",
+    "Domain", "Website", "Startup Source", "Team Size", "Industry", "Region", "Remote Status",
     "Has Relevant Opening", "Opening Checked At", "Opening Check Status", "Job Source",
     "Date Discovered", "Email Provider", "Email Verification Status", "Email Status",
     "Date Created", "Date Contacted", "Follow-up Status", "Duplicate Key", "Notes",
@@ -91,7 +91,10 @@ def tracker_row(row, state=None):
         row["Resume File"] = row.get("Resume File") or state["Resume Attachment"]
     if not row.get("Email Provider"):
         source = (row.get("Email Source") or "").casefold()
-        row["Email Provider"] = "Hunter" if "hunter.io" in source else "Apollo" if "apollo.io" in source else "Public source" if source else ""
+        # Codes: COMPANY_WEBSITE / PROSPEO / HUNTER / TOMBA / NO_VERIFIED_EMAIL;
+        # PUBLIC_SOURCE for an address from research or a public hiring post.
+        row["Email Provider"] = ("HUNTER" if "hunter.io" in source else "PUBLIC_SOURCE" if source
+                                 else "NO_VERIFIED_EMAIL" if row.get("Company") else "")
     return row
 
 

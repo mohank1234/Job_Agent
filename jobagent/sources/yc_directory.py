@@ -92,6 +92,10 @@ def candidates(companies, *, min_size=10, max_size=200, primary=(), places=()):
             continue
         text = " ".join([_text(c.get("one_liner")), _text(c.get("industry")), _text(c.get("subindustry")),
                          *_strings(c.get("tags")), *_strings(c.get("industries"))])
+        # Relevance before any lookup: a software or AI product, where QA/SDET
+        # work is central. Hardware-only or lab companies are not researched.
+        if not SOFTWARE.search(text):
+            continue
         regions = " ".join([*_strings(c.get("regions")), _text(c.get("all_locations"))]).lower()
         score = (2 * bool(SOFTWARE.search(text)) + bool(AI.search(text))
                  + 3 * any(p in regions for p in top) + 2 * ("remote" in regions)
@@ -113,6 +117,7 @@ def candidates(companies, *, min_size=10, max_size=200, primary=(), places=()):
                        "domain": domain, "team_size": c["team_size"], "one_liner": _text(c.get("one_liner")),
                        "batch": _text(c.get("batch")), "tags": _strings(c.get("tags")),
                        "industries": _strings(c.get("industries")), "regions": _strings(c.get("regions")),
+                       "industry": _text(c.get("subindustry")) or _text(c.get("industry")),
                        "location": _text(c.get("all_locations")), "url": _text(c.get("url")),
                        "source": "Y Combinator directory", "is_hiring": True, "status": "Active", "fit": score})
     return result

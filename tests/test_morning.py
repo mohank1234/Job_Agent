@@ -310,14 +310,16 @@ def test_daily_work_finds_verified_cto_email_for_small_startup(tmp_path, monkeyp
     monkeypatch.setattr(morning, 'collect_boards', lambda *a, **k: [record])
     monkeypatch.setattr(llm, 'make_provider', lambda cfg: None)
     monkeypatch.setattr(exa, 'exa_search', search)
-    monkeypatch.setattr(email_finder, 'find_emails', find_emails)
+    from jobagent.enrich import hunter
+    monkeypatch.setattr(hunter, 'api_key', lambda: 'test')
+    monkeypatch.setattr(hunter, 'make_finder', lambda *a, **k: find_emails)
     monkeypatch.setattr(daily_research, 'research_company', lambda row, *a, **k: {
         'Research Checked At': now_iso(), '_errors': [], '_sources': [{'url': 'https://www.beta.io/about'}]})
     profile = load_profile(Path(__file__).resolve().parents[1]/'profile.yaml.example')
     profile.raw['identity']['experience']['years'] = 5
     out, state = project/'out', project/'state'
     (state/'2026-09-28').mkdir(parents=True)
-    paid = {'morning':{}, 'billing':{'allow_paid_services': True}}
+    paid = {'morning':{}}  # Hunter's Email Finder for the identified CTO (free plan)
     summary = morning.daily_work(paid, profile, out, state/'2026-09-28', progress=lambda *a:None)
     assert finder_calls == [[{'firstName': 'Cai', 'surname': 'Tech', 'domain': 'beta.io'}]]
     rows = list(__import__('csv').DictReader((out/'Startup Outreach.csv').open(encoding='utf-8-sig')))
@@ -329,7 +331,8 @@ def test_daily_work_finds_verified_cto_email_for_small_startup(tmp_path, monkeyp
     (state/'2026-09-29').mkdir()
     morning.daily_work(paid, profile, out, state/'2026-09-29', progress=lambda *a:None)
     assert len(finder_calls) == 1
-    # Free-only (the default): no paid lookup, but the CTO is still named.
+    # With no provider keys: no lookup, but the CTO is still named.
+    monkeypatch.setattr(hunter, 'api_key', lambda: '')
     (state/'founder-emails.json').unlink()
     (state/'2026-09-30').mkdir()
     morning.daily_work({'morning':{}}, profile, out, state/'2026-09-30', progress=lambda *a:None)

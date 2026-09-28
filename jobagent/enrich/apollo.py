@@ -95,7 +95,7 @@ def leaders(domain, post=None):
         # different current employer when one is disclosed by search.
         if current_domain and current_domain != domain:
             continue
-        if (p.get("id") or p.get("person_id")) and name and founders.rank(p.get("title")) < 4:
+        if (p.get("id") or p.get("person_id")) and name and founders.is_decision_maker(p.get("title")):
             people.append({"id": p.get("id") or p["person_id"], "name": name, "title": p["title"],
                            "linkedin": p.get("linkedin_url") or "", "domain": domain,
                            "organization": organization.get("name") or ""})
@@ -105,7 +105,7 @@ def leaders(domain, post=None):
 def reveal(person, domain, usage_path, monthly_limit=50, post=None):
     """The person's verified work email via People Enrichment (one credit), or ''."""
     domain = founders.professional_domain(domain)
-    if not api_key() or not domain or not person.get("id") or founders.rank(person.get("title")) >= 4:
+    if not api_key() or not domain or not person.get("id") or not founders.is_decision_maker(person.get("title")):
         return ""
     usage_path = Path(usage_path)
     with process_lock(usage_path.with_suffix(".lock")):
@@ -131,7 +131,7 @@ def reveal(person, domain, usage_path, monthly_limit=50, post=None):
         # Search may hide last names. Replace its abbreviated identity with
         # the enriched identity, while never promoting a non-leadership role.
         title = found.get("title") or person.get("title")
-        if founders.rank(title) >= 4:
+        if not founders.is_decision_maker(title):
             return ""
         person.update(name=found.get("name") or " ".join(x for x in (found.get("first_name"), found.get("last_name")) if x)
                       or person.get("name"), title=title, linkedin=found.get("linkedin_url") or person.get("linkedin", ""))

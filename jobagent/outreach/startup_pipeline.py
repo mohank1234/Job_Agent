@@ -16,7 +16,7 @@ from jobagent.outreach.service import recent
 from jobagent.outreach.verification import canonical
 
 STARTUP_FIELDS = (
-    'Domain', 'Website', 'Startup Source', 'Team Size', 'Region', 'Remote Status',
+    'Domain', 'Website', 'Startup Source', 'Team Size', 'Industry', 'Region', 'Remote Status',
     'Has Relevant Opening', 'Opening Checked At', 'Opening Check Status',
     'Job Source', 'Date Discovered', 'Notes', 'Email Provider', 'Email Verification Status',
 )
@@ -71,7 +71,7 @@ def discover(cfg, profile, run_dir, rows, coverage, *, remaining=lambda: None, p
                   'Domain': company['domain'], 'Website': company['website'],
                   'Startup Source': 'YC public directory', 'Team Size': company['team_size'],
                   'Employee Count': str(company['team_size']), 'Employee Count Source': company['url'],
-                  'Region': ', '.join(company.get('regions', [])),
+                  'Region': ', '.join(company.get('regions', [])), 'Industry': company.get('industry', ''),
                   'Has Relevant Opening': has_opening, 'Opening Checked At': checked,
                   'Opening Check Status': ('Checked: ' if check.get('complete') else 'Incomplete: ') + check['status'],
                   'Date Discovered': checked, 'Investor Backing': 'Y Combinator',
@@ -109,24 +109,48 @@ def discover(cfg, profile, run_dir, rows, coverage, *, remaining=lambda: None, p
     return startups, checks
 
 
+PROVIDER_CODES = ('COMPANY_WEBSITE', 'PROSPEO', 'HUNTER', 'TOMBA', 'NO_VERIFIED_EMAIL')
+
+
+def _person_contact(person, email, provider, detail, domain):
+    """Contact fields for a provider-verified address of a named decision-maker."""
+    linkedin = person.get('url', '') if 'linkedin.com/in/' in person.get('url', '') else ''
+    source = next((u for u in (person.get('source'), linkedin) if (u or '').startswith(('http://', 'https://'))),
+                  f'https://{domain}')
+    label = provider.title()
+    return {'Public Work Email': email, 'Email Source': source, 'Email Contact Name': person['name'],
+            'Email Contact Role': person['title'], 'Email Contact LinkedIn': linkedin,
+            'Email Provider': provider, 'Email Verification Status': 'verified', 'Company Domain': domain,
+            'Email Evidence': f'{label}: {detail}; name and role from {source}',
+            'Email Ownership Status': f'Verified deliverable mailbox; found by {label}',
+            'Email Ownership Checked At': now_iso()}
+
+
 def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
                     search, allow_paid=False, contacted=lambda row: False,
-                    remaining=lambda: None, progress=print):
-    """Known verified contact -> Hunter -> Apollo -> opt-in existing verifier."""
-    from jobagent.enrich import apollo, hunter
-    from jobagent.enrich.email_finder import find_emails
+                    remaining=lambda: None, progress=print, read_site=None):
+    """One decision-maker per relevant company, then the email waterfall:
+    company website -> Prospeo -> Hunter -> Tomba -> NO_VERIFIED_EMAIL,
+    stopping at the first published or verified address. Free lookups
+    (website, known leaders) always come before any provider credit."""
+    from jobagent.enrich import hunter, prospeo, tomba
+    from jobagent.enrich.credits import Credits, LimitReached
+    from jobagent.outreach import website_contacts
     from jobagent import discovery
+    read_site = read_site or website_contacts.read_site
     state_dir = Path(state_dir)
     issues = []
-    hunter_active = bool(hunter.api_key())
-    apollo_active = bool(apollo.api_key())
+    prospeo_credits = Credits(state_dir / 'provider-usage' / 'prospeo.json', cfg.get('prospeo_monthly_limit', 100), 'Prospeo')
+    tomba_credits = Credits(state_dir / 'provider-usage' / 'tomba.json', cfg.get('tomba_monthly_limit', 25), 'Tomba')
     hunter_usage = state_dir / 'hunter-usage.json'
-    hunter_finder = hunter.make_finder(hunter_usage, cfg.get('hunter_monthly_limit', 50)) if hunter_active else None
-    paid_finder = (lambda people: find_emails(people, max_charge_per_run_usd=cfg.get('max_charge_per_run_usd', 0.5))) if allow_paid else None
+    live = {'PROSPEO': bool(prospeo.api_key()), 'HUNTER': bool(hunter.api_key()), 'TOMBA': tomba.active()}
+    hunter_finder = hunter.make_finder(hunter_usage, cfg.get('hunter_monthly_limit', 50)) if live['HUNTER'] else None
     target = cfg.get('min_employees', 10), cfg.get('max_employees', 200)
     recheck = discovery.recent_cutoff(today, cfg.get('recheck_days', 30))
     empty_recheck = discovery.recent_cutoff(today, cfg.get('recheck_empty_days', 7))
-    seen = set()
+    signature = [live['PROSPEO'], live['HUNTER'], live['TOMBA']]
+    tally = dict.fromkeys(PROVIDER_CODES, 0)
+    seen, used_emails = set(), set()
     for row in rows:
         key, ck = row['Company'].casefold(), founders.key(row['Company'])
         meta = metadata.get(key)
@@ -136,10 +160,8 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
         known = sizes.get(ck, {})
         size = (known.get('low'), known.get('high'))
         team_size = size[1] if size[1] is not None else row.get('Team Size')
-        is_startup = bool(row.get('Startup Source') or row.get('Listing Type', '').startswith('Y Combinator'))
+        # Relevance before any credit: outside the startup size range, skip.
         if size[0] is not None and not founders.in_target(size, *target):
-            continue
-        if size[0] is None and not (is_startup or hunter_active or apollo_active):
             continue
         # A careers-board name ("globalli") is a poor lookup key; the company's
         # own website is often linked in its research sources or job description.
@@ -151,87 +173,145 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
             meta['Domain'] = domain
         if (founders.verified_leadership_contact(meta, domain)
                 and recent(meta.get('Email Ownership Checked At'), max_age_days=30)):
+            used_emails.add(meta['Public Work Email'].casefold())
             continue
         earlier = lookups.get(domain) or lookups.get(ck, {})
         cache_valid = not earlier.get('domain') or earlier['domain'] == domain
         cached = earlier.get('contact') or {}
         if (cache_valid and earlier.get('checked', '') >= recheck
                 and founders.verified_leadership_contact(cached, domain)
-                and recent(cached.get('Email Ownership Checked At'), max_age_days=30)):
+                and recent(cached.get('Email Ownership Checked At'), max_age_days=30)
+                and cached['Public Work Email'].casefold() not in used_emails):
             meta.update(cached)
+            used_emails.add(cached['Public Work Email'].casefold())
             continue
-        remaining()
-        people = earlier.get('people', []) if cache_valid and earlier.get('leaders_checked', '') >= recheck else []
-        if not people:
-            try:
-                people = founders.leaders(row, meta, search, team_size=team_size)
-            except Exception as exc:
-                issues.append({'stage': 'leadership', 'company': row['Company'], 'error': type(exc).__name__})
-                people = []
-            if people:
-                earlier.update(leaders_checked=today.isoformat(), people=people)
-        if people and not meta.get('Manager Name'):
-            lead = people[0]
-            meta.update({'Manager Name': lead['name'], 'Manager Role': lead['title'],
-                         'Manager Source': lead.get('source') or lead.get('url', ''),
-                         'Manager LinkedIn': lead.get('url', '') if 'linkedin.com/in/' in lead.get('url', '') else ''})
-        provider_signature = [bool(hunter.api_key()), bool(apollo.api_key()), bool(allow_paid)]
         if (cache_valid and not cached and earlier.get('checked', '') >= empty_recheck
-                and earlier.get('providers') == provider_signature):
-            continue
-        contact, failed, attempted = {}, False, False
-        if hunter_active:
-            attempted = True
+                and earlier.get('providers') == signature):
+            meta.setdefault('Email Provider', 'NO_VERIFIED_EMAIL')
+            continue  # no verified email last week; retried after recheck_empty_days
+        remaining()
+        steps = []
+        # Decision-maker first, from free sources: leaders already known
+        # (job posting, research, search) and the company's own website.
+        site = {'pages': [], 'leaders': [], 'emails': []}
+        if domain:
+            site_url = row.get('Website') or f'https://{domain}'
             try:
-                executives = hunter.executives(founders.plain_name(row['Company']), domain, hunter_usage,
-                                                cfg.get('hunter_monthly_limit', 50))
-                contact = founders.contact_from_executives(row['Company'], executives, domain_given=bool(domain),
-                                                           team_size=team_size, expected_domain=domain)
-                listed = [e for e in executives if founders.rank(e.get('title', '')) < 4]
-                progress(f"Hunter {row['Company']} ({domain or 'by name'}): {len(executives)} executives listed; "
-                         f"leaders: {', '.join(e['title'] + (' (verified)' if e['verified'] else '') for e in listed[:3]) or 'none'}; "
-                         f"{'verified email used' if contact else 'no verified leader email'}.")
-                if contact and size[0] is None:
-                    # Size unknown: Hunter's company lookup decides, 10-200 only.
-                    email_domain = contact['Public Work Email'].rsplit('@', 1)[1]
-                    found = hunter.company_size(email_domain, hunter_usage, cfg.get('hunter_monthly_limit', 50))
-                    if found:
-                        sizes[ck] = {'Employee Count': founders.size_label(found), 'low': found[0], 'high': found[1],
-                                     'Employee Count Source': f'Hunter company enrichment for {email_domain}',
-                                     'checked': today.isoformat()}
-                        meta.update({'Employee Count': sizes[ck]['Employee Count'],
-                                     'Employee Count Source': sizes[ck]['Employee Count Source']})
-                        if not founders.in_target(found, *target):
-                            progress(f"Hunter {row['Company']}: {founders.size_label(found)} employees, outside the target; not used.")
-                            contact = {}
-                if not contact and people and domain:
-                    contact = founders.verified_contact(people, domain, hunter_finder)
+                site = read_site(site_url)
             except Exception as exc:
-                failed = True
-                hunter_active = False  # no repeated billing/auth/refusal calls this run
-                issues.append({'stage': 'hunter', 'company': row['Company'], 'error': getattr(exc, 'kind', type(exc).__name__)})
-        if not contact and apollo_active and domain:
-            attempted = True
-            try:
-                contact = apollo.best_contact(row['Company'], domain, state_dir / 'apollo-usage.json',
-                                              monthly_limit=cfg.get('apollo_monthly_limit', 10), team_size=team_size)
-            except Exception as exc:
-                failed = True
-                apollo_active = False
-                issues.append({'stage': 'apollo', 'company': row['Company'], 'error': getattr(exc, 'kind', type(exc).__name__)})
-        if not contact and paid_finder and people and domain:
-            attempted = True
-            try:
-                contact = founders.verified_contact(people, domain, paid_finder)
-            except Exception as exc:
-                failed = True
-                paid_finder = None
-                issues.append({'stage': 'founder_email', 'company': row['Company'], 'error': getattr(exc, 'kind', type(exc).__name__)})
+                steps.append(f'website unreadable ({type(exc).__name__})')
+        try:
+            known_people = founders.leaders(row, meta, search, team_size=team_size)
+        except Exception as exc:
+            issues.append({'stage': 'leadership', 'company': row['Company'], 'error': type(exc).__name__})
+            known_people = []
+        people = sorted({founders.key(p['name']): p for p in [*site.get('leaders', []), *known_people]}.values(),
+                        key=lambda p: founders.rank(p.get('title')))
+        best = next((p for p in people if founders.split_name(p['name'])), None)
+        if best and not meta.get('Manager Name'):
+            meta.update({'Manager Name': best['name'], 'Manager Role': best['title'],
+                         'Manager Source': best.get('source') or best.get('url', ''),
+                         'Manager LinkedIn': best.get('url', '') if 'linkedin.com/in/' in best.get('url', '') else ''})
+        # 1. Company website: an address the company itself publishes.
+        contact = website_contacts.published_contact(site, people, domain) if domain else {}
+        steps.append(f"website: published {contact['Public Work Email']}" if contact else
+                     f"website: no published leadership email ({len(site.get('pages', []))} pages read)"
+                     if domain else 'website: skipped (company website not known)')
+        name_parts = founders.split_name(best['name']) if best else None
+        # 2. Prospeo (needs the decision-maker's name).
+        if not contact:
+            if not live['PROSPEO']:
+                steps.append('Prospeo: skipped (no PROSPEO_API_KEY)')
+            elif not (name_parts and domain):
+                steps.append('Prospeo: skipped (no decision-maker name or website identified)')
+            else:
+                try:
+                    email, detail = prospeo.find_email(name_parts[0], name_parts[1], domain, prospeo_credits)
+                    steps.append(f'Prospeo: {detail}')
+                    if email:
+                        contact = _person_contact(best, email, 'PROSPEO', detail, domain)
+                except LimitReached as exc:
+                    live['PROSPEO'] = False
+                    steps.append(f'Prospeo: stopped for this run ({exc})')
+                except Exception as exc:
+                    steps.append(f'Prospeo: error {type(exc).__name__}')
+                    issues.append({'stage': 'prospeo', 'company': row['Company'], 'error': type(exc).__name__})
+        # 3. Hunter: the named decision-maker if known, else one Domain Search
+        # that lists the company's leaders (one credit either way, never both).
+        if not contact:
+            if not live['HUNTER']:
+                steps.append('Hunter: skipped (no HUNTER_API_KEY or allowance used)')
+            else:
+                try:
+                    if name_parts and domain:
+                        contact = founders.verified_contact([best], domain, hunter_finder)
+                        steps.append(f"Hunter Email Finder for {best['name']}: "
+                                     + ('verified' if contact else 'no verified address'))
+                    else:
+                        executives = hunter.executives(founders.plain_name(row['Company']), domain, hunter_usage,
+                                                        cfg.get('hunter_monthly_limit', 50))
+                        contact = founders.contact_from_executives(row['Company'], executives, domain_given=bool(domain),
+                                                                   team_size=team_size, expected_domain=domain,
+                                                                   provider='HUNTER')
+                        listed = [e for e in executives if founders.is_decision_maker(e.get('title', ''))]
+                        steps.append(f"Hunter Domain Search: {len(executives)} executives, "
+                                     f"{len(listed)} decision-makers, " + ('verified email' if contact else 'none verified'))
+                        if contact and size[0] is None:
+                            # Size unknown: Hunter's company lookup decides.
+                            email_domain = contact['Public Work Email'].rsplit('@', 1)[1]
+                            found = hunter.company_size(email_domain, hunter_usage, cfg.get('hunter_monthly_limit', 50))
+                            if found:
+                                sizes[ck] = {'Employee Count': founders.size_label(found), 'low': found[0],
+                                             'high': found[1], 'checked': today.isoformat(),
+                                             'Employee Count Source': f'Hunter company enrichment for {email_domain}'}
+                                meta.update({'Employee Count': sizes[ck]['Employee Count'],
+                                             'Employee Count Source': sizes[ck]['Employee Count Source']})
+                                if not founders.in_target(found, *target):
+                                    steps.append(f'Hunter: {founders.size_label(found)} employees, outside the target')
+                                    contact = {}
+                    if contact:
+                        contact['Email Provider'] = 'HUNTER'
+                except Exception as exc:
+                    live['HUNTER'] = False
+                    steps.append(f"Hunter: stopped for this run ({getattr(exc, 'kind', type(exc).__name__)})")
+                    issues.append({'stage': 'hunter', 'company': row['Company'],
+                                   'error': getattr(exc, 'kind', type(exc).__name__)})
+        # 4. Tomba (needs the decision-maker's name), the last resort.
+        if not contact:
+            if not live['TOMBA']:
+                steps.append('Tomba: skipped (no TOMBA keys or allowance used)')
+            elif not (name_parts and domain):
+                steps.append('Tomba: skipped (no decision-maker name or website identified)')
+            else:
+                try:
+                    email, detail = tomba.find_email(name_parts[0], name_parts[1], domain, tomba_credits)
+                    steps.append(f'Tomba: {detail}')
+                    if email:
+                        contact = _person_contact(best, email, 'TOMBA', detail, domain)
+                except LimitReached as exc:
+                    live['TOMBA'] = False
+                    steps.append(f'Tomba: stopped for this run ({exc})')
+                except Exception as exc:
+                    steps.append(f'Tomba: error {type(exc).__name__}')
+                    issues.append({'stage': 'tomba', 'company': row['Company'], 'error': type(exc).__name__})
+        # Duplicate protection: one address is never used for two companies.
+        if contact and contact['Public Work Email'].casefold() in used_emails:
+            steps.append(f"duplicate: {contact['Public Work Email']} already used for another company")
+            contact = {}
         if contact:
             meta.update(contact)
-            progress(f"Verified professional email: {row['Company']} / {contact['Email Contact Role']}.")
-        if contact or (attempted and not failed):
-            earlier.update(checked=today.isoformat(), domain=domain, contact=contact, providers=provider_signature)
+            used_emails.add(contact['Public Work Email'].casefold())
+            tally[contact['Email Provider']] = tally.get(contact['Email Provider'], 0) + 1
+        else:
+            meta['Email Provider'] = 'NO_VERIFIED_EMAIL'
+            tally['NO_VERIFIED_EMAIL'] += 1
+        who = f"{best['name']} ({best['title']})" if best else 'not identified'
+        progress(f"{row['Company']} [{domain or 'no website'}] decision-maker {who}: "
+                 + ' -> '.join(steps) + f" => {contact.get('Email Provider', 'NO_VERIFIED_EMAIL')}")
+        earlier.update(checked=today.isoformat(), domain=domain, contact=contact, providers=signature,
+                       people=people[:3], leaders_checked=today.isoformat())
         lookups[domain or ck] = earlier
         atomic_json(state_dir / 'founder-emails.json', lookups)
+    progress('Leadership emails this run: ' + ', '.join(f'{k} {v}' for k, v in tally.items())
+             + f'. {prospeo_credits.summary()}; {tomba_credits.summary()}.')
     return issues

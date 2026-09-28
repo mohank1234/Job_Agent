@@ -141,31 +141,45 @@ def profile_leaders(company, search):
         lines = [line.strip() for line in result.get("snippet", "").splitlines() if line.strip()]
         name = lines[0][2:].strip() if lines and lines[0].startswith("# ") else result.get("title", "").split(" - ")[0]
         headline = lines[1] if len(lines) > 1 else ""
-        if name and rank(headline) < 4 and wanted and wanted in key(headline):
+        if name and is_decision_maker(headline) and wanted and wanted in key(headline):
             found.append({"name": name, "title": headline[:160], "url": url, "source": url})
     return found
 
 
 ENGINEERING_HEAD = re.compile(r"\b(?:vp|vice president|head)\b[^|,]{0,25}\bengineering\b", re.I)
-SMALL_TEAM = 50
+# The contact order, most preferred first (user's rules, 2026-09-29). A title
+# matching none of these is not a decision-maker and is never looked up.
+PRIORITY = [
+    ("Founder", re.compile(r"(?<!co-)(?<!co )(?<!co)\bfounder\b", re.I)),
+    ("Co-Founder", re.compile(r"\bco[-\s]?founder\b", re.I)),
+    ("CEO", re.compile(r"\bceo\b|chief executive", re.I)),
+    ("CTO", re.compile(r"\bcto\b|chief technolog(?:y|ical)", re.I)),
+    ("VP / Head of Engineering", ENGINEERING_HEAD),
+    ("Head of QA", re.compile(r"\b(?:head|director|vp|lead|manager)\b[^|,]{0,20}\b(?:qa|quality|testing)\b|"
+                              r"\b(?:qa|quality|test)\b[^|,]{0,10}\b(?:head|director|manager|lead)\b", re.I)),
+    ("Engineering Manager", re.compile(r"\bengineering manager\b|\bmanager,? engineering\b", re.I)),
+    ("Senior technical leader", re.compile(r"\b(?:director|head|vp|vice president)\b[^|,]{0,25}"
+                                           r"\b(?:technology|platform|product engineering|software)\b", re.I)),
+]
+NOT_A_LEADER = len(PRIORITY)
 
 
 def rank(title, team_size=None):
-    """Who to contact first. Up to 50 people: Founder/Co-founder, CTO, CEO.
-    Larger (or unknown): CTO, technical co-founder, Founder/CEO. VP or Head of
-    Engineering only when none of those is available."""
-    title = title or ""
-    cto = bool(re.search(r"\bcto\b|chief technolog(?:y|ical)", title, re.I))
-    founder = bool(re.search(r"\bfounder\b|\bco[-\s]?founder\b", title, re.I))
-    ceo = bool(re.search(r"\bceo\b|chief executive", title, re.I))
-    if team_size is not None and team_size <= SMALL_TEAM:
-        order = [founder, cto, ceo]
-    else:
-        order = [cto, founder and bool(re.search(r"technical|cto|engineering", title, re.I)), founder or ceo]
-    for n, hit in enumerate(order):
-        if hit:
+    """Position in the contact order (0 = Founder ... 7 = other senior technical
+    leader), or NOT_A_LEADER. `team_size` is accepted for compatibility; the
+    order is the same for every company size."""
+    for n, (_label, pattern) in enumerate(PRIORITY):
+        if pattern.search(title or ""):
             return n
-    return 3 if ENGINEERING_HEAD.search(title) else 4
+    return NOT_A_LEADER
+
+
+def is_decision_maker(title):
+    return rank(title) < NOT_A_LEADER
+
+
+# Published leadership inboxes: founders@, ceo@, cto@ (never info@, hello@ ...).
+LEADERSHIP_INBOX = re.compile(r"(?:co-?)?founders?|ceo|cto", re.I)
 
 
 def leaders(row, meta, search=None, team_size=None):
@@ -178,10 +192,10 @@ def leaders(row, meta, search=None, team_size=None):
         contacts = []
     for c in contacts if isinstance(contacts, list) else []:
         # A posting's hiring contact may be a recruiter. Require a named role.
-        if isinstance(c, dict) and c.get("name") and rank(c.get("title")) < 4:
+        if isinstance(c, dict) and c.get("name") and is_decision_maker(c.get("title")):
             people.append({"name": c["name"], "title": c["title"],
                            "url": c.get("url") or row.get("Job Link", ""), "source": row.get("Job Link", "")})
-    if meta.get("Manager Name") and rank(meta.get("Manager Role", "")) < 4:
+    if meta.get("Manager Name") and is_decision_maker(meta.get("Manager Role", "")):
         people.append({"name": meta["Manager Name"], "title": meta["Manager Role"],
                        "url": meta.get("Manager LinkedIn") or meta.get("Manager Source", ""),
                        "source": meta.get("Manager Source", "")})
@@ -233,7 +247,7 @@ def contact_from_executives(company, executives, *, domain_given, team_size=None
                                      and (organization.startswith(wanted) or wanted.startswith(organization))):
             continue
         title = person.get("title", "")
-        if not (person.get("verified") and person.get("name") and rank(title, team_size) < 4
+        if not (person.get("verified") and person.get("name") and is_decision_maker(title)
                 and professional_email(person.get("email", ""), domain)):
             continue
         if best is None or rank(title, team_size) < rank(best["title"], team_size):
@@ -263,7 +277,7 @@ def verified_contact(people, domain, finder):
     wanted = []
     for p in people:
         parts = split_name(p["name"])
-        if parts and rank(p.get("title")) < 4:
+        if parts and is_decision_maker(p.get("title")):
             wanted.append((p, {"firstName": parts[0], "surname": parts[1], "domain": domain}))
     if not wanted or not domain:
         return {}
@@ -309,14 +323,20 @@ def verified_leadership_contact(meta, domain=""):
     # verification status and were checked against the company on creation.
     if not domain and "@" in email:
         domain = email.rsplit("@", 1)[1]
-    if not professional_email(email, domain) or not meta.get("Email Contact Name"):
-        return False
-    if rank(meta.get("Email Contact Role")) >= 4:
+    if not professional_email(email, domain) or not is_decision_maker(meta.get("Email Contact Role")):
         return False
     status = str(meta.get("Email Verification Status") or "").casefold()
     ownership = str(meta.get("Email Ownership Status") or "").casefold()
-    if status not in ("verified", "valid") and not ownership.startswith("verified deliverable mailbox"):
-        return False
+    # An address the company itself publishes on its own website counts as
+    # trusted (labelled "published", never "verified"); a published founders@
+    # or ceo@ inbox needs no personal name.
+    published = (meta.get("Email Provider") == "COMPANY_WEBSITE" and status == "published"
+                 and (meta.get("Email Contact Name") or LEADERSHIP_INBOX.fullmatch(email.split("@")[0])))
+    if not published:
+        if not meta.get("Email Contact Name"):
+            return False
+        if status not in ("verified", "valid") and not ownership.startswith("verified deliverable mailbox"):
+            return False
     try:
         source = urlsplit(meta.get("Email Source") or "")
         checked = datetime.fromisoformat(meta.get("Email Ownership Checked At") or "")

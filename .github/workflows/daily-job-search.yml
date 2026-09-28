@@ -101,6 +101,9 @@ jobs:
         if: github.event.inputs.validate_only == 'true'
         env:
           HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
+          PROSPEO_API_KEY: ${{ secrets.PROSPEO_API_KEY }}
+          TOMBA_API_KEY: ${{ secrets.TOMBA_API_KEY }}
+          TOMBA_SECRET: ${{ secrets.TOMBA_SECRET }}
           APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
         run: |
           if [ "${{ github.event.inputs.apollo_enrichment_test }}" = "true" ]; then
@@ -195,6 +198,11 @@ jobs:
         env:
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
+          # Email waterfall: website -> Prospeo -> Hunter -> Tomba (free plans,
+          # capped per month and per day; a missing secret turns a step off).
+          PROSPEO_API_KEY: ${{ secrets.PROSPEO_API_KEY }}
+          TOMBA_API_KEY: ${{ secrets.TOMBA_API_KEY }}
+          TOMBA_SECRET: ${{ secrets.TOMBA_SECRET }}
           # Optional: Apollo free plan (reveals capped per month); unset = off.
           APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
           FORCE_RUN: ${{ github.event.inputs.force_run }}
