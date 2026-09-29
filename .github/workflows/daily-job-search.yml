@@ -96,8 +96,9 @@ jobs:
         run: python -m jobagent.cloud_state prepare
 
       # "Validate only" also confirms the contact-provider keys, using only
-      # free calls (Hunter account status, one 0-credit Apollo search).
-      - name: Check Hunter and Apollo keys (no credits used)
+      # free account calls for Prospeo/Hunter/Tomba and one 0-credit Apollo
+      # search. The separate Apollo enrichment option is explicitly opt-in.
+      - name: Check contact-provider keys
         if: github.event.inputs.validate_only == 'true'
         env:
           HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}

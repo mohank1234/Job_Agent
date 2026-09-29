@@ -150,7 +150,7 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
     empty_recheck = discovery.recent_cutoff(today, cfg.get('recheck_empty_days', 7))
     signature = [live['PROSPEO'], live['HUNTER'], live['TOMBA']]
     tally = dict.fromkeys(PROVIDER_CODES, 0)
-    seen, used_emails = set(), set()
+    seen, seen_domains, used_emails = set(), set(), set()
     for row in rows:
         key, ck = row['Company'].casefold(), founders.key(row['Company'])
         meta = metadata.get(key)
@@ -171,6 +171,13 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
                                              + [row.get('Employer Job Link', ''), *jd_links]))
         if domain:
             meta['Domain'] = domain
+            if domain in seen_domains:
+                meta.pop('Public Work Email', None)
+                meta['Email Provider'] = 'NO_VERIFIED_EMAIL'
+                meta['Contact Status'] = 'Duplicate company domain; retained the first company lookup'
+                progress(f'{row["Company"]}: duplicate domain already used for another company; no additional lookup.')
+                continue
+            seen_domains.add(domain)
         if (founders.verified_leadership_contact(meta, domain)
                 and recent(meta.get('Email Ownership Checked At'), max_age_days=30)):
             used_emails.add(meta['Public Work Email'].casefold())
@@ -186,11 +193,12 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
             used_emails.add(cached['Public Work Email'].casefold())
             continue
         if (cache_valid and not cached and earlier.get('checked', '') >= empty_recheck
-                and earlier.get('providers') == signature):
+                and earlier.get('providers') == signature and not earlier.get('retry_needed')):
             meta.setdefault('Email Provider', 'NO_VERIFIED_EMAIL')
             continue  # no verified email last week; retried after recheck_empty_days
         remaining()
         steps = []
+        retry_needed = False
         # Decision-maker first, from free sources: leaders already known
         # (job posting, research, search) and the company's own website.
         site = {'pages': [], 'leaders': [], 'emails': []}
@@ -199,10 +207,12 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
             try:
                 site = read_site(site_url)
             except Exception as exc:
+                retry_needed = True
                 steps.append(f'website unreadable ({type(exc).__name__})')
         try:
             known_people = founders.leaders(row, meta, search, team_size=team_size)
         except Exception as exc:
+            retry_needed = True
             issues.append({'stage': 'leadership', 'company': row['Company'], 'error': type(exc).__name__})
             known_people = []
         people = sorted({founders.key(p['name']): p for p in [*site.get('leaders', []), *known_people]}.values(),
@@ -221,25 +231,30 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
         # 2. Prospeo (needs the decision-maker's name).
         if not contact:
             if not live['PROSPEO']:
+                retry_needed |= signature[0]
                 steps.append('Prospeo: skipped (no PROSPEO_API_KEY)')
             elif not (name_parts and domain):
                 steps.append('Prospeo: skipped (no decision-maker name or website identified)')
             else:
                 try:
                     email, detail = prospeo.find_email(name_parts[0], name_parts[1], domain, prospeo_credits)
+                    retry_needed |= detail.startswith('unusable response')
                     steps.append(f'Prospeo: {detail}')
                     if email:
                         contact = _person_contact(best, email, 'PROSPEO', detail, domain)
                 except LimitReached as exc:
+                    retry_needed = True
                     live['PROSPEO'] = False
                     steps.append(f'Prospeo: stopped for this run ({exc})')
                 except Exception as exc:
+                    retry_needed = True
                     steps.append(f'Prospeo: error {type(exc).__name__}')
                     issues.append({'stage': 'prospeo', 'company': row['Company'], 'error': type(exc).__name__})
         # 3. Hunter: the named decision-maker if known, else one Domain Search
         # that lists the company's leaders (one credit either way, never both).
         if not contact:
             if not live['HUNTER']:
+                retry_needed |= signature[1]
                 steps.append('Hunter: skipped (no HUNTER_API_KEY or allowance used)')
             else:
                 try:
@@ -272,6 +287,7 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
                     if contact:
                         contact['Email Provider'] = 'HUNTER'
                 except Exception as exc:
+                    retry_needed = True
                     live['HUNTER'] = False
                     steps.append(f"Hunter: stopped for this run ({getattr(exc, 'kind', type(exc).__name__)})")
                     issues.append({'stage': 'hunter', 'company': row['Company'],
@@ -279,19 +295,23 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
         # 4. Tomba (needs the decision-maker's name), the last resort.
         if not contact:
             if not live['TOMBA']:
+                retry_needed |= signature[2]
                 steps.append('Tomba: skipped (no TOMBA keys or allowance used)')
             elif not (name_parts and domain):
                 steps.append('Tomba: skipped (no decision-maker name or website identified)')
             else:
                 try:
                     email, detail = tomba.find_email(name_parts[0], name_parts[1], domain, tomba_credits)
+                    retry_needed |= detail.startswith('unusable response')
                     steps.append(f'Tomba: {detail}')
                     if email:
                         contact = _person_contact(best, email, 'TOMBA', detail, domain)
                 except LimitReached as exc:
+                    retry_needed = True
                     live['TOMBA'] = False
                     steps.append(f'Tomba: stopped for this run ({exc})')
                 except Exception as exc:
+                    retry_needed = True
                     steps.append(f'Tomba: error {type(exc).__name__}')
                     issues.append({'stage': 'tomba', 'company': row['Company'], 'error': type(exc).__name__})
         # Duplicate protection: one address is never used for two companies.
@@ -309,7 +329,7 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
         progress(f"{row['Company']} [{domain or 'no website'}] decision-maker {who}: "
                  + ' -> '.join(steps) + f" => {contact.get('Email Provider', 'NO_VERIFIED_EMAIL')}")
         earlier.update(checked=today.isoformat(), domain=domain, contact=contact, providers=signature,
-                       people=people[:3], leaders_checked=today.isoformat())
+                       people=people[:3], leaders_checked=today.isoformat(), retry_needed=retry_needed and not bool(contact))
         lookups[domain or ck] = earlier
         atomic_json(state_dir / 'founder-emails.json', lookups)
     progress('Leadership emails this run: ' + ', '.join(f'{k} {v}' for k, v in tally.items())

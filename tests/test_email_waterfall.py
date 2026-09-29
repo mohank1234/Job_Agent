@@ -132,10 +132,50 @@ def test_without_a_name_only_hunter_domain_search_is_spent(monkeypatch, tmp_path
 
 def test_one_address_is_never_used_for_two_companies(monkeypatch, tmp_path):
     rows = [ROW, {**ROW, "Company": "Gamma", "Domain": "beta.io", "Website": "https://beta.io"}]
-    calls, meta, log = run(monkeypatch, tmp_path, prospeo_result=("cai@beta.io", "VERIFIED"), rows=rows)
+    lookups = {}
+    calls, meta, log = run(monkeypatch, tmp_path, prospeo_result=("cai@beta.io", "VERIFIED"), rows=rows, lookups=lookups)
+    assert calls == ['prospeo']  # no second paid lookup for the alias
+    assert lookups['beta.io']['contact']['Public Work Email'] == 'cai@beta.io'
     assert meta["beta"]["Public Work Email"] == "cai@beta.io"
     assert meta["gamma"]["Email Provider"] == "NO_VERIFIED_EMAIL"
     assert any("already used for another company" in line for line in log)
+
+
+@pytest.mark.parametrize('partial', [None, 'TOMBA_API_KEY', 'TOMBA_SECRET'])
+def test_missing_optional_keys_skip_without_charges_and_keep_hunter(monkeypatch, tmp_path, partial):
+    if partial:
+        monkeypatch.setenv(partial, 'test-only')
+    monkeypatch.setattr(prospeo, 'find_email', lambda *a, **k: pytest.fail('Missing Prospeo key'))
+    monkeypatch.setattr(tomba, 'find_email', lambda *a, **k: pytest.fail('Incomplete Tomba keys'))
+    monkeypatch.setattr(hunter, 'api_key', lambda: 'test-only')
+    monkeypatch.setattr(hunter, 'make_finder', lambda *a, **k: lambda people: {
+        ('cai', 'tech'): {'email': 'cai@beta.io', 'validationStatus': 'valid'}})
+    meta = {'beta': {}}
+    startup_pipeline.enrich_contacts([ROW], meta, {}, {}, {}, tmp_path, date.today(), search=None,
+        progress=lambda m: None, read_site=lambda url: {'pages': [], 'emails': [], 'leaders': [
+            {'name': 'Cai Tech', 'title': 'CTO', 'source': 'https://beta.io/team', 'url': ''}]})
+    assert meta['beta']['Email Provider'] == 'HUNTER'
+    assert not list((tmp_path / 'provider-usage').glob('*.json'))
+
+
+def test_temporary_refusal_stops_run_but_does_not_cache_no_match_for_week(monkeypatch, tmp_path):
+    from datetime import timedelta
+    calls, lookups = [], {}
+    monkeypatch.setattr(prospeo, 'api_key', lambda: 'test-only')
+    def limited(*args, **kwargs):
+        calls.append('prospeo')
+        raise LimitReached('daily allowance used')
+    monkeypatch.setattr(prospeo, 'find_email', limited)
+    rows = [ROW, {**ROW, 'Company': 'Gamma', 'Domain': 'gamma.io', 'Website': 'https://gamma.io'}]
+    site = lambda url: {'pages': [url], 'emails': [], 'leaders': [
+        {'name': 'Cai Tech', 'title': 'CTO', 'source': url, 'url': url}]}
+    for day in [date.today(), date.today() + timedelta(days=1)]:
+        meta = {'beta': {}, 'gamma': {}}
+        startup_pipeline.enrich_contacts(rows, meta, {}, lookups, {}, tmp_path, day,
+            search=None, progress=lambda m: None, read_site=site)
+        assert all(r['Email Provider'] == 'NO_VERIFIED_EMAIL' for r in meta.values())
+        assert lookups['beta.io']['retry_needed'] and lookups['gamma.io']['retry_needed']
+    assert calls == ['prospeo', 'prospeo']  # once per run, retried after daily reset
 
 
 def test_outside_the_size_range_spends_nothing(monkeypatch, tmp_path):
