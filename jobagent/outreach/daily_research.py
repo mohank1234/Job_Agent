@@ -21,7 +21,7 @@ from jobagent.outreach.service import recent
 from jobagent.outreach.verification import canonical, get_public
 from jobagent.models import clean_html
 
-STYLE_VERSION = 9
+STYLE_VERSION = 10
 EMAIL = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])", re.I)
 BROKERS = ('rocketreach', 'apollo.io', 'contactout', 'signalhire', 'leadiq', 'zoominfo', 'lusha', 'wiza.co')
 META = ['Startup Priority', 'Investor Backing', 'YC Batch', 'Investment Source',
@@ -356,7 +356,7 @@ def compose_email(*, name, role, company, facts, title='', jd_text='', company_t
                   + (f' My automation experience includes {_join(tools)}.' if tools else ''))
     recent = recent_work(jd_text, company_text, facts)
     paragraphs = [why, experience] + ([f"More recently, I've been {recent}."] if recent else []) + [ask]
-    body = f"Hi {name},\n\nI hope you're doing well.\n\n" + '\n\n'.join(paragraphs)
+    body = f"Hello {name},\n\nI hope you're doing well.\n\n" + '\n\n'.join(paragraphs)
     body += f"\n\n{signoff_for(role)},\n{facts['name']}"
     if facts.get('phone'):
         body += '\n' + str(facts['phone']).strip()

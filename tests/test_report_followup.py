@@ -1,5 +1,6 @@
 import base64
 import csv
+import json
 import pytest
 from email.message import EmailMessage
 from types import SimpleNamespace
@@ -144,7 +145,9 @@ def test_sourced_recipient_and_signature_update_existing_draft(tmp_path):
     sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)
     # Opening/saving in Gmail can strip our custom header without changing content.
     decoded=decode_draft(service.data['1'])
+    from jobagent.outreach.report_drafts import html_body
     message=EmailMessage();message['Subject']=decoded['subject'];message['To']=decoded['to'];message.set_content(decoded['body'])
+    message.add_alternative(html_body(decoded['body']), subtype='html')  # Gmail keeps the formatted version
     service.data['1']['message']['raw']=base64.urlsafe_b64encode(message.as_bytes()).decode()
     row['Public Work Email']='alex@example.com'
     row['Cold Email']+='\n5550101234'
@@ -249,3 +252,32 @@ def test_confirmed_sent_contact_never_recreated(tmp_path):
 def test_recipient_requires_exact_address_and_public_evidence(changes):
     row={'Public Work Email':'alex@example.com','Email Source':'https://example.com/team','Email Evidence':'Public record'}
     assert draft_recipient({**row,**changes})==''
+
+
+def test_drafts_are_formatted_like_gmail_and_old_plain_drafts_are_upgraded(tmp_path):
+    from email import policy
+    from email.parser import BytesParser
+    from jobagent.outreach.report_drafts import html_body
+    long = 'I came across Acme and wanted to reach out regarding potential Senior QA or SDET opportunities on your team.'
+    body = f'Hello Alex,\n\nI hope you\'re doing well.\n\n{long}\n\nBest regards,\nCandidate\n8897404807'
+    row={'Company':'Example','Job Link':'https://jobs.example/1','Cold Email Subject':'QA at Example','Cold Email':body,
+         'Public Work Email':'alex@example.com','Email Source':'https://example.com/team','Email Evidence':'Public'}
+    with (tmp_path/'Startup Outreach.csv').open('w',newline='',encoding='utf-8') as f:
+        writer=csv.DictWriter(f,fieldnames=list(row));writer.writeheader();writer.writerow(row)
+    service=FakeGmail()
+    kwargs={'ledger_path':tmp_path/'ledger.json','service':service}
+    assert sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']=='Created and read back'
+    msg=BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(service.data['1']['message']['raw']))
+    html=msg.get_body(preferencelist=('html',)).get_content()
+    # Each paragraph is one block, never broken mid-sentence; the sign-off keeps its lines.
+    assert f'<div>{long}</div>' in html and 'Best regards,<br>Candidate<br>8897404807' in html
+    assert html == html_body(body) + '\n'
+    # A draft this app made before HTML bodies (plain text only) is upgraded once.
+    ledger=json.loads((tmp_path/'ledger.json').read_text())
+    plain=EmailMessage();plain['Subject']=row['Cold Email Subject'];plain['To']='alex@example.com';plain.set_content(body)
+    service.data['1']['message']['raw']=base64.urlsafe_b64encode(plain.as_bytes()).decode()
+    from jobagent.outreach.report_drafts import content_hash
+    key=next(iter(ledger)); ledger[key]['content_hash']=content_hash(row['Cold Email Subject'],body,'alex@example.com',[])
+    (tmp_path/'ledger.json').write_text(json.dumps(ledger))
+    assert sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']=='Updated and read back'
+    assert sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']=='Existing draft reused'

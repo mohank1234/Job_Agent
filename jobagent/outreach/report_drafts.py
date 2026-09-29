@@ -17,8 +17,13 @@ ROOT = Path(__file__).resolve().parents[2]
 LEDGER = ROOT / 'gmail_report_drafts.json'
 
 
-def content_hash(subject, body, to='', attachments=()):
+def content_hash(subject, body, to='', attachments=(), html=False):
     value = to+'\n'+subject+'\n'+body.strip()
+    # A formatted (HTML) draft differs from a plain-text-only one, so drafts
+    # made before HTML bodies are updated once. Plain text adds no marker, so
+    # hashes stored before this change stay valid.
+    if html:
+        value += '\nformat:html'
     if attachments:
         value += '\nattachments\n' + json.dumps(sorted(attachments, key=lambda a: (a['filename'], a['sha256'])), sort_keys=True)
     return hashlib.sha256(value.encode()).hexdigest()
@@ -54,8 +59,19 @@ def decode_draft(draft):
                     'sha256':hashlib.sha256(part.get_payload(decode=True) or b'').hexdigest()}
                    for part in message.walk() if not part.is_multipart()
                    and (part.get_filename() or part.get_content_disposition() == 'attachment')]
+    html = any(part.get_content_type() == 'text/html' for part in message.walk() if not part.is_multipart())
     return {'key':message.get('X-JobAgent-Draft-Key',''), 'subject':str(message.get('Subject','')),
-            'to':str(message.get('To','')), 'body':body.replace('\r\n','\n').strip(), 'attachments':attachments}
+            'to':str(message.get('To','')), 'body':body.replace('\r\n','\n').strip(), 'attachments':attachments,
+            'html':html}
+
+
+def html_body(body):
+    """The email as Gmail's own editor stores it: each paragraph a block and
+    line breaks kept (sign-off), so it flows to any window width instead of
+    being hard-wrapped the way plain text is."""
+    import html as html_lib
+    paragraphs = [html_lib.escape(p.strip()).replace('\n', '<br>') for p in body.strip().split('\n\n') if p.strip()]
+    return '<div dir="ltr">' + '<div><br></div>'.join(f'<div>{p}</div>' for p in paragraphs) + '</div>'
 
 
 def draft_recipient(row):
@@ -167,7 +183,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 from email.utils import getaddresses
                 recipients.update(address.casefold() for _, address in getaddresses([decoded['to']]))
             key = decoded['key'] or keys_by_id.get(draft['id']) or pending_hashes.get(
-                content_hash(decoded['subject'], decoded['body'], decoded['to'], decoded['attachments']))
+                content_hash(decoded['subject'], decoded['body'], decoded['to'], decoded['attachments'], decoded['html']))
             if key:
                 owned[key] = (draft,decoded)
         processed = set()
@@ -192,7 +208,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                     row_data, row_meta = None, None
                 else:
                     row_data, row_meta = load_resume(tailored_path)
-            desired_hash = content_hash(subject,body,to,[row_meta] if row_meta else [])
+            desired_hash = content_hash(subject,body,to,[row_meta] if row_meta else [],html=True)
             entry = ledger.get(key,{})
             result = {'Company':row['Company'],'Job Link':row.get('Job Link',''),'Status':'',
                       'Gmail Draft URL':'','Recipient':to or 'Public email not available; To left blank',
@@ -240,7 +256,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
             if current:
                 draft, decoded = current
                 actual_attachments = decoded['attachments']
-                actual_hash = content_hash(decoded['subject'],decoded['body'],decoded['to'],actual_attachments)
+                actual_hash = content_hash(decoded['subject'],decoded['body'],decoded['to'],actual_attachments,decoded['html'])
                 if actual_hash == desired_hash:
                     entry.update(state='drafted',draft_id=draft['id'],content_hash=actual_hash)
                     result['Status'] = 'Existing draft reused'
@@ -265,6 +281,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 if to:
                     message['To'] = to
                 message.set_content(body)
+                message.add_alternative(html_body(body), subtype='html')
                 if row_meta:
                     maintype, subtype = row_meta['mime_type'].split('/', 1)
                     message.add_attachment(row_data, maintype=maintype, subtype=subtype, filename=row_meta['filename'])
@@ -289,7 +306,7 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                 try:
                     saved = api.update(userId='me',id=current[0]['id'],body=payload).execute() if updating else api.create(userId='me',body=payload).execute()
                     decoded = decode_draft(api.get(userId='me',id=saved['id'],format='raw').execute())
-                    if content_hash(decoded['subject'],decoded['body'],decoded['to'],decoded['attachments']) != desired_hash:
+                    if content_hash(decoded['subject'],decoded['body'],decoded['to'],decoded['attachments'],decoded['html']) != desired_hash:
                         raise ValueError('Draft read-back differs')
                     actual_attachments = decoded['attachments']
                     owned[key] = (saved, decoded)

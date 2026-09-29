@@ -170,7 +170,7 @@ def test_drafts_grounded_cached_and_approval_pending(tmp_path):
     assert not cached_draft(row, {'Manager Name':'Different Recipient'}, facts, tmp_path)[1]
     assert len(grounded_draft({**row,'Company':'VeryLongCompany'*80}, {}, facts)['LinkedIn Note']) <= 300
     addressed = grounded_draft(row, {'Manager Name':'Alex Leader','Email Contact Name':'Sam Recruiter'}, facts)
-    assert addressed['Cold Email'].startswith('Hi Sam,')
+    assert addressed['Cold Email'].startswith('Hello Sam,')
     assert addressed['LinkedIn Note'].startswith('Hi Alex,')
 
 
@@ -324,7 +324,7 @@ def test_daily_work_finds_verified_cto_email_for_small_startup(tmp_path, monkeyp
     assert finder_calls == [[{'firstName': 'Cai', 'surname': 'Tech', 'domain': 'beta.io'}]]
     rows = list(__import__('csv').DictReader((out/'Startup Outreach.csv').open(encoding='utf-8-sig')))
     assert rows[0]['Public Work Email'] == 'cai@beta.io' and rows[0]['Employee Count'] == '11-50'
-    assert rows[0]['Cold Email'].startswith('Hi Cai,')
+    assert rows[0]['Cold Email'].startswith('Hello Cai,')
     assert summary['new_contacts'] == 1 and summary['verified_founder_emails'] == 1
     assert summary['companies_10_to_200_employees'] == 1
     # A second run the same month reuses the lookup instead of paying again.
@@ -388,7 +388,7 @@ def test_startup_without_opening_gets_one_proactive_draft_to_its_verified_cto(tm
     assert row['Public Work Email'] == 'cai@beta.io' and row['Has Relevant Opening'] == 'False'
     assert row['Draft Status'].startswith('Draft only; proactive enquiry')
     assert row['Email Template'].startswith('9 - Proactive')
-    assert row['Cold Email'].startswith('Hi Cai,\n\nI hope you\'re doing well.')
+    assert row['Cold Email'].startswith('Hello Cai,\n\nI hope you\'re doing well.')
     assert 'I came across Beta and your work on AI products' in row['Cold Email']
     assert "need for QA/SDET expertise" in row['Cold Email'] and row['Cold Email'].endswith('Candidate\n8897404807')
     assert row['Resume File'].endswith('Candidate_Senior_QA_SDET_5Yrs.pdf') and (out/row['Resume File']).is_file()
@@ -433,7 +433,7 @@ def test_email_format_follows_the_reader(role,number,signoff,phrase):
     assert draft['Email Template'].startswith(number+' - ')
     paragraphs=draft['Cold Email'].split('\n\n')
     # Hi name / well-wishing line / why / experience and tools / ask / sign-off, name, number
-    assert paragraphs[0]=='Hi Sam,' and paragraphs[1]=="I hope you're doing well."
+    assert paragraphs[0]=='Hello Sam,' and paragraphs[1]=="I hope you're doing well."
     assert paragraphs[-1].split('\n')==[signoff+',','Candidate','8897404807']
     assert phrase in draft['Cold Email'] and 'For example' not in draft['Cold Email']
     # Tools the JD names that the resume also has come first; Cypress is never claimed.
