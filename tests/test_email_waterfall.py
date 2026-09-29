@@ -41,7 +41,7 @@ def test_prospeo_accepts_only_verified_domain_email_and_counts_found_emails(tmp_
 def test_tomba_counts_every_call_and_accepts_only_valid(tmp_path, monkeypatch):
     monkeypatch.setenv("TOMBA_API_KEY", "k")
     monkeypatch.setenv("TOMBA_SECRET", "s")
-    credits = Credits(tmp_path / "t.json", 25, "Tomba")
+    credits = Credits(tmp_path / "t.json", 60, "Tomba")  # 2 a day
     valid = lambda *a, **k: Resp(200, {"data": {"email": "cai@beta.io", "score": 91, "verification": {"status": "valid"}}})
     risky = lambda *a, **k: Resp(200, {"data": {"email": "cai@beta.io", "verification": {"status": "accept_all"}}})
     assert tomba.find_email("Cai", "Tech", "beta.io", credits, get=valid)[0] == "cai@beta.io"
@@ -67,13 +67,10 @@ def test_credits_follow_the_providers_own_balance_and_renewal_date(tmp_path):
         none_left.check()
 
 
-def test_credits_spread_the_month_and_stop_at_the_limit(tmp_path):
-    import calendar
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    days_left = calendar.monthrange(now.year, now.month)[1] - now.day + 1
-    c = Credits(tmp_path / "c.json", 10 * days_left, "X")
-    for _ in range(10):
+def test_without_a_reported_renewal_date_the_daily_share_is_a_thirtieth(tmp_path):
+    # 60 a month -> 2 a day, even on the last day of a calendar month.
+    c = Credits(tmp_path / "c.json", 60, "X")
+    for _ in range(2):
         c.check()
         c.spend()
     with pytest.raises(LimitReached):

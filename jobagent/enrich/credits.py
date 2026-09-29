@@ -4,15 +4,15 @@ One JSON file per provider under the private state directory:
 {"month": "2026-10", "used": 12, "day": "2026-10-03", "used_before_today": 9}
 
 - `check()` refuses before a call once the month's free allowance is used, or
-  once today's even share of what is left has been spent (so a single day
-  cannot use a whole month).
+  once today's share has been spent: what the provider reports left, spread
+  over the days until its own renewal date; without that, a thirtieth of the
+  monthly limit (so a single day cannot use a whole month).
 - `spend()` records a used credit. Providers that charge only for a found
   email record only then; providers whose no-result policy is unknown record
   every call (conservative).
 """
 from __future__ import annotations
 
-import calendar
 import json
 import math
 from datetime import datetime, timezone
@@ -67,8 +67,9 @@ class Credits:
                 atomic_json(self.path, data)
             days_left = (reset - now.date()).days
             return math.ceil(max(0, data["left_at_day_start"]) / days_left), data
-        days_left = calendar.monthrange(now.year, now.month)[1] - now.day + 1
-        return math.ceil(max(0, self.limit - data["used_before_today"]) / days_left), data
+        # The provider does not report its renewal date, which may not be the
+        # 1st: a fixed share of the monthly limit per day, never a month-end burst.
+        return math.ceil(self.limit / 30), data
 
     def check(self):
         allowance, data = self.allowance_today()
