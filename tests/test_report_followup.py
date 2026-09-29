@@ -281,3 +281,18 @@ def test_drafts_are_formatted_like_gmail_and_old_plain_drafts_are_upgraded(tmp_p
     (tmp_path/'ledger.json').write_text(json.dumps(ledger))
     assert sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']=='Updated and read back'
     assert sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']=='Existing draft reused'
+
+
+def test_a_draft_the_user_sent_or_deleted_marks_the_company_done(tmp_path):
+    row={'Company':'Example','Job Link':'https://jobs.example/1','Cold Email Subject':'QA at Example',
+         'Cold Email':'Hello Alex,\n\nBody.','Public Work Email':'alex@example.com',
+         'Email Source':'https://example.com/team','Email Evidence':'Public'}
+    with (tmp_path/'Startup Outreach.csv').open('w',newline='',encoding='utf-8') as f:
+        writer=csv.DictWriter(f,fieldnames=list(row));writer.writeheader();writer.writerow(row)
+    service=FakeGmail()
+    kwargs={'ledger_path':tmp_path/'ledger.json','service':service}
+    sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)
+    service.data.clear()  # sent or deleted in Gmail
+    assert 'not recreated' in sync_report_drafts(tmp_path,'candidate@example.com',**kwargs)[0]['Status']
+    ledger=json.loads((tmp_path/'ledger.json').read_text())
+    assert [e['state'] for e in ledger.values()] == ['absent'] and service.created == 1

@@ -617,10 +617,10 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
     history = read_json(history_path, {})
     cooldown = discovery.recent_cutoff(today, cfg.get('research_cooldown_days', 14))
     def contacted(row):
-        # Sent only: an unsent draft stays in the report so it can still be
-        # sent (automatically in auto-send mode) instead of being stranded.
+        # Sent, or its draft sent/deleted by the user in Gmail ("absent"). An
+        # unsent draft stays in the report so it can still be sent.
         entry = ledger.get(hashlib.sha256(company_key(row['Company']).encode()).hexdigest()[:24], {})
-        return entry.get('state') == 'sent'
+        return entry.get('state') in ('sent', 'absent')
     # Startups of about 10-200 people come first: their founders and CTO
     # usually hire directly. Size is read once a month per company.
     from jobagent.outreach import founders

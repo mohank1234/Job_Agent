@@ -268,6 +268,10 @@ def sync_report_drafts(out, expected_sender, *, ledger_path=LEDGER, service=None
                     result['Status'] = 'Update needed'
             elif entry and not recreate_missing:
                 result['Status'] = 'Previously reserved draft absent; not recreated (may have been sent/deleted)'
+                if entry.get('state') == 'drafted':
+                    # The user sent or deleted it in Gmail: this company is
+                    # done, and is no longer re-checked as an unsent draft.
+                    entry.update(state='absent', absent_since=entry.get('absent_since') or now_iso())
             elif subject in subjects or to.casefold() in recipients:
                 result['Status'] = 'Similar existing draft preserved; no duplicate created'
             else:
