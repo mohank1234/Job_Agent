@@ -51,6 +51,22 @@ def test_tomba_counts_every_call_and_accepts_only_valid(tmp_path, monkeypatch):
         tomba.find_email("Cai", "Tech", "beta.io", credits, get=lambda *a, **k: Resp(429, {}))
 
 
+def test_credits_follow_the_providers_own_balance_and_renewal_date(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    reset = (datetime.now(timezone.utc) + timedelta(days=10)).date()
+    reads = []
+    c = Credits(tmp_path / "p.json", 100, "Prospeo", account=lambda: reads.append(1) or {"left": 30, "reset": reset})
+    for _ in range(3):  # 30 left over 10 days: 3 today, however few days the calendar month has left
+        c.check()
+        c.spend()
+    with pytest.raises(LimitReached, match=r"\(3\)"):
+        c.check()
+    assert len(reads) == 1  # the provider's balance is read once per run
+    none_left = Credits(tmp_path / "q.json", 100, "Prospeo", account=lambda: {"left": 0, "reset": reset})
+    with pytest.raises(LimitReached):
+        none_left.check()
+
+
 def test_credits_spread_the_month_and_stop_at_the_limit(tmp_path):
     import calendar
     from datetime import datetime, timezone

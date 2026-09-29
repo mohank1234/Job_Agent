@@ -140,7 +140,8 @@ def enrich_contacts(rows, metadata, sizes, lookups, cfg, state_dir, today, *,
     read_site = read_site or website_contacts.read_site
     state_dir = Path(state_dir)
     issues = []
-    prospeo_credits = Credits(state_dir / 'provider-usage' / 'prospeo.json', cfg.get('prospeo_monthly_limit', 100), 'Prospeo')
+    prospeo_credits = Credits(state_dir / 'provider-usage' / 'prospeo.json', cfg.get('prospeo_monthly_limit', 100), 'Prospeo',
+                              account=prospeo.account_status if prospeo.api_key() else None)
     tomba_credits = Credits(state_dir / 'provider-usage' / 'tomba.json', cfg.get('tomba_monthly_limit', 25), 'Tomba')
     hunter_usage = state_dir / 'hunter-usage.json'
     live = {'PROSPEO': bool(prospeo.api_key()), 'HUNTER': bool(hunter.api_key()), 'TOMBA': tomba.active()}

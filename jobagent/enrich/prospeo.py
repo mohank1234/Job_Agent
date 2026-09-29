@@ -29,6 +29,23 @@ def api_key():
     return os.environ.get("PROSPEO_API_KEY", "").strip()
 
 
+def account_status(get=httpx.get):
+    """{'left': credits left, 'reset': renewal date} from Prospeo's free
+    account-information call, or {} when it cannot be read."""
+    from datetime import date
+    resp = get("https://api.prospeo.io/account-information", timeout=TIMEOUT,
+               headers={"X-KEY": api_key(), "Content-Type": "application/json"})
+    info = (resp.json() or {}).get("response") if resp.status_code == 200 else None
+    if not isinstance(info, dict):
+        return {}
+    try:
+        left = int(info.get("remaining_credits"))
+        reset = date.fromisoformat(str(info.get("next_quota_renewal_date") or "")[:10])
+    except (TypeError, ValueError):
+        return {}
+    return {"left": left, "reset": reset}
+
+
 def find_email(first, last, domain, credits, post=httpx.post):
     """(email, detail) for a VERIFIED address on `domain`, else ('', reason).
     Raises LimitReached when the allowance is used or Prospeo refuses."""
