@@ -8,19 +8,23 @@ name: Daily job search
 # Separately, a same-account status email (real results, no outreach) is
 # sent to yourself each day real work completes - see jobagent/notify.py.
 #
-# in_window() in jobagent/morning.py restricts real work to 06:00-11:00 IST
+# in_window() in jobagent/morning.py restricts real work to 06:00-14:00 IST
 # regardless of the runner's own timezone, so multiple triggers below are
 # safe: only the first one each day does the run, the rest resume checkpoints
 # or no-op via the ledger in research/morning-private/.
+# Start times avoid the top of the hour, when GitHub most often delays or
+# drops scheduled runs (on 2026-09-29 two starts were dropped and the third
+# ran 55 minutes late).
 on:
   schedule:
-    - cron: '30 0 * * *'  # 06:00 IST - primary run
-    - cron: '0 3 * * *'   # 08:30 IST - catch-up if the primary run failed/skipped
-    - cron: '0 5 * * *'   # 10:30 IST - last-chance catch-up before the window closes
+    - cron: '37 0 * * *'  # 06:07 IST - primary run
+    - cron: '37 2 * * *'  # 08:07 IST - catch-up if the primary run failed/skipped
+    - cron: '37 4 * * *'  # 10:07 IST - catch-up
+    - cron: '37 6 * * *'  # 12:07 IST - last-chance catch-up before the 14:00 window end
   workflow_dispatch:
     inputs:
       force_run:
-        description: 'Force a real run right now (ignore the 06:00-11:00 IST window and "already done today" check). Testing only.'
+        description: 'Force a real run right now (ignore the 06:00-14:00 IST window and "already done today" check). Testing only.'
         type: boolean
         default: false
       validate_only:
@@ -217,7 +221,7 @@ jobs:
           python run.py morning $ARGS 2>&1 | tee morning-run.log
           code=${PIPESTATUS[0]}
           set -e
-          # 2 = "window_ended": the 11:00 IST deadline hit mid-run. Expected
+          # 2 = "window_ended": the 14:00 IST deadline hit mid-run. Expected
           # and not a failure - the next scheduled trigger resumes from the
           # checkpoint.
           #

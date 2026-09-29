@@ -31,8 +31,8 @@ morning:
   workers: 6
   max_report_rows: 1000
   # No cap on companies researched or drafts: every fresh company is handled
-  # while the 06:00-11:00 IST window allows, stopping this many minutes
-  # before 11:00 so the report is always written.
+  # while the 06:00-14:00 IST window allows, stopping this many minutes
+  # before 14:00 so the report is always written.
   report_reserve_minutes: 20
   gmail_drafts: false  # Enable after Gmail compose consent for the expected account.
   signature_phone: ""  # Optional phone placed on the line after your name in email drafts.
@@ -121,7 +121,7 @@ llm:
   #
   # MEASURED 2026-09-27, RTX 5060 Laptop (8 GB VRAM) + 16 GB RAM:
   #   gpt-oss:20b  ~18 tok/s (59% CPU / 41% GPU), valid schema JSON on 6-job
-  #                batches, ~1-1.5 min per batch - fits the 06:00-11:00 window.
+  #                batches, ~1-1.5 min per batch - fits the 06:00-14:00 window.
   # A model that fits entirely in VRAM (e.g. qwen3:8b) is roughly 3x faster.
   #
   # Hosted alternatives (gemini, groq, openrouter, omnirate) remain available

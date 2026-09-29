@@ -1,4 +1,4 @@
-"""One resumable search-and-draft run per IST date, with a 06:00-11:00 gate."""
+"""One resumable search-and-draft run per IST date, with a 06:00-14:00 gate."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -31,8 +31,15 @@ YC_ALL_ITEMS = 200
 EXPERIENCE = re.compile(r"(?<![\d.])(\d{1,2})(?:\s*(?:[-\u2013\u2014]|to)\s*(\d{1,2}))?\s*(\+)?\s*(?:years?|yrs?)\b", re.I)
 
 
+# Daily run window in IST. GitHub often starts scheduled runs late (on
+# 2026-09-29 the first start came 55 minutes late and two were dropped), so a
+# late start still has until 14:00 to do the day's work.
+WINDOW_START_HOUR, WINDOW_END_HOUR = 6, 14
+WINDOW = f"{WINDOW_START_HOUR:02d}:00 <= IST < {WINDOW_END_HOUR:02d}:00"
+
+
 def in_window(now):
-    return 6 <= now.astimezone(IST).hour < 11
+    return WINDOW_START_HOUR <= now.astimezone(IST).hour < WINDOW_END_HOUR
 
 
 def day_key(now):
@@ -804,7 +811,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
                'manager_profiles': sum(bool(r.get('Manager LinkedIn')) for r in roles),
                'investor_evidenced_companies': sum(bool(r.get('Investment Source')) for r in roles),
                'compensation_filter': False, 'experience_rule': 'Stated minimum of 4, 5 or 6 years; exact range remains visible',
-               'schedule': '06:00 <= Asia/Kolkata < 11:00; at most one completed run per IST date',
+               'schedule': f'{WINDOW} (Asia/Kolkata); at most one completed run per IST date',
                'workflow_order': ['Job search and Excel report', 'Gmail drafts' if cfg.get('gmail_drafts') else 'Gmail drafts disabled', 'Drive publication'],
                'approval_required': True, 'outreach_sent': 0}
     notes = ['# Daily job search and outreach', '', f'Checked: {summary["checked_at"]}', '',
@@ -820,8 +827,8 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
              'Only outreach with a sourced recipient email becomes a Gmail draft. Outreach with missing contacts stays in Excel for research; historical addresses remain labeled and are not delivery-verified.',
              'The job search and Excel report finish first, then Gmail drafts are saved, then outputs are published to the same Drive folder.',
              'Source Coverage.csv records failures and zero-result boards. All Job Decisions.csv keeps all assessed rejection reasons. Discovery Leads.csv contains unverified external links.',
-             'The cloud schedule requests 06:00 IST with 08:30 and 10:30 catch-up triggers. A persistent ledger and process lock prevent duplicate completed runs; interrupted runs resume checkpoints. GitHub may delay triggers.',
-             'Cloud runs do not need the laptop online. Job searches start only within 06:00-11:00 IST. Browserbase portal work remains pending separately.', '']
+             'The cloud schedule requests 06:07 IST with 08:07, 10:07 and 12:07 catch-up triggers. A persistent ledger and process lock prevent duplicate completed runs; interrupted runs resume checkpoints. GitHub may delay triggers.',
+             f'Cloud runs do not need the laptop online. Job searches start only within {WINDOW}. Browserbase portal work remains pending separately.', '']
     (out / 'Research Notes.md').write_text('\n\n'.join(notes), encoding='utf-8')
     # Export public evidence, never candidate contacts, credentials or caches.
     evidence = {k: {'metadata': {f: v for f, v in m.items() if not f.startswith('_')},
@@ -865,7 +872,7 @@ def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
 def run_daily(config, profile, out, *, initial=False, now=None, state_dir=STATE, work=None, publish=None, preflight=None, progress=print):
     now = now or datetime.now(timezone.utc)
     if not initial and not in_window(now):
-        return {"status": "skipped_outside_window", "date_ist": day_key(now), "window": "06:00 <= IST < 11:00"}
+        return {"status": "skipped_outside_window", "date_ist": day_key(now), "window": WINDOW}
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     with process_lock(state_dir / "daily.lock"):
@@ -882,7 +889,7 @@ def run_daily(config, profile, out, *, initial=False, now=None, state_dir=STATE,
         entry.update(status="running", initial=initial, started_at=entry.get("started_at") or now_iso())
         ledger["days"][key] = entry
         atomic_json(ledger_path, ledger)
-        deadline = None if initial else datetime.combine(now.astimezone(IST).date(), datetime.min.time(), IST).replace(hour=11).astimezone(timezone.utc)
+        deadline = None if initial else datetime.combine(now.astimezone(IST).date(), datetime.min.time(), IST).replace(hour=WINDOW_END_HOUR).astimezone(timezone.utc)
         try:
             if entry.get("stage") != "prepared":
                 result = work(config, profile, out, run_dir, deadline=deadline, progress=progress)

@@ -12,9 +12,10 @@ not "which jobs contain my keywords?".
 
 `python run.py morning` runs the daily public-board search, public contact
 research and unsent outreach, then publishes to the same Drive folder. The
-GitHub Actions workflow requests a 06:00 IST run with 08:30 and 10:30 catch-up
-triggers, so the laptop can be off. GitHub may delay scheduled triggers; the
-workflow starts job searches only within 06:00-11:00 IST. Keep the local tasks
+GitHub Actions workflow requests a 06:07 IST run with 08:07, 10:07 and 12:07
+catch-up triggers, so the laptop can be off. GitHub may delay or drop scheduled
+triggers (starts are placed off the top of the hour, when that is most common);
+the workflow starts job searches only within 06:00-14:00 IST. Keep the local tasks
 disabled while cloud scheduling is active. As a local alternative,
 `Install-Report-Schedule.ps1` requires the computer awake and online. A process
 lock, daily ledger and saved checkpoints prevent duplicate

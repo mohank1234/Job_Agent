@@ -11,7 +11,7 @@ from jobagent.runtime import process_lock
 from tests.test_regressions import posting
 
 
-@pytest.mark.parametrize('hour,minute,allowed', [(5,59,False),(6,0,True),(10,59,True),(11,0,False),(23,0,False)])
+@pytest.mark.parametrize('hour,minute,allowed', [(5,59,False),(6,0,True),(11,25,True),(13,59,True),(14,0,False),(23,0,False)])
 def test_ist_window(hour, minute, allowed):
     now = datetime(2026, 9, 9, hour, minute, tzinfo=morning.IST)
     assert morning.in_window(now.astimezone(timezone.utc)) is allowed
@@ -40,7 +40,7 @@ def test_outside_window_performs_no_preflight_or_work(tmp_path):
     def forbidden(*a, **kw):
         raise AssertionError('Outside-window action attempted')
     result = morning.run_daily({}, None, tmp_path/'out', state_dir=tmp_path/'state',
-                               now=datetime(2026,9,9,11,tzinfo=morning.IST), work=forbidden,
+                               now=datetime(2026,9,9,14,tzinfo=morning.IST), work=forbidden,
                                preflight=forbidden, publish=forbidden)
     assert result['status'] == 'skipped_outside_window'
     assert not (tmp_path/'state').exists()

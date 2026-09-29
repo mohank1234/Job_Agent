@@ -1184,7 +1184,7 @@ def main() -> None:
     refresh.add_argument("--publish", action="store_true", help="publish output into the permanent Drive folder and report")
     refresh.set_defaults(func=cmd_refresh_report)
 
-    morning = sub.add_parser('morning', help='once-daily 06:00-11:00 IST search, unsent outreach and Drive publication')
+    morning = sub.add_parser('morning', help='once-daily 06:00-14:00 IST search, unsent outreach and Drive publication')
     morning.add_argument('--out', default='research/report-latest')
     morning.add_argument('--initial', action='store_true', help='explicitly authorized one-time setup run outside the morning window')
     morning.set_defaults(func=cmd_morning)
