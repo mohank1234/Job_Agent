@@ -1,0 +1,17 @@
+{
+  "auto_apply_min_score": 75,
+  "review_min_score": 60,
+  "max_jobs_per_run": 100,
+  "batch_size": 25,
+  "auto_submit": false,
+  "max_attempts": 2,
+  "retry_delay_seconds": 60,
+  "delay_between_jobs_ms": 1000,
+  "answers": {
+    "How many years of experience do you have as an SDET / Automation Engineer?": "4.5",
+    "What is your level of proficiency in English?": "Professional"
+  },
+  "headless": false,
+  "require_submission_confirmation": true,
+  "allow_resume_tailoring": false
+}

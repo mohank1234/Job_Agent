@@ -1,0 +1,13 @@
+[
+  {
+    "company": "Example QA Labs",
+    "title": "QA Automation Engineer",
+    "location": "Remote",
+    "workMode": "Remote",
+    "jobUrl": "https://example.com/jobs/qa-automation-engineer",
+    "source": "controlled-feed",
+    "postedAt": "2026-09-15T08:00:00.000Z",
+    "description": "QA Automation Engineer with manual testing, Playwright, TypeScript, API testing, and regression testing experience.",
+    "applicationUrl": "https://example.com/apply/qa-automation-engineer"
+  }
+]

@@ -1,0 +1,77 @@
+{
+  "full_name": "Test Candidate",
+  "email": "candidate@example.com",
+  "phone": "0000000000",
+  "phone_country_code": "+91",
+  "location": "Hyderabad, Telangana, India",
+  "linkedin": "https://www.linkedin.com/in/example",
+  "github": "https://github.com/example",
+  "portfolio": "https://example.com",
+  "years_experience": 5,
+  "current_company": "Example Corp",
+  "previous_companies": [
+    "Example Previous Corp"
+  ],
+  "skills": [
+    "Manual Testing",
+    "Functional Testing",
+    "Regression Testing",
+    "Integration Testing",
+    "System Testing",
+    "UI Testing",
+    "Web Application Testing",
+    "API Testing",
+    "Test Case Design",
+    "Test Execution",
+    "Defect Tracking",
+    "Automation Testing",
+    "Selenium",
+    "Playwright",
+    "Java",
+    "Quality Assurance",
+    "AI Application Testing",
+    "GenAI Testing",
+    "LLM Testing",
+    "RAG Testing",
+    "RAG Evaluation",
+    "AI Agent Testing",
+    "Prompt Testing",
+    "Prompt Evaluation",
+    "Promptfoo",
+    "AI/CV Application Testing",
+    "Human Data Workflows",
+    "AI Agent Evaluation"
+  ],
+  "automation_skills": [
+    "Selenium",
+    "Playwright",
+    "Java",
+    "UI Automation",
+    "Regression Automation"
+  ],
+  "ai_testing_skills": [
+    "LLM Testing",
+    "RAG Testing",
+    "RAG Evaluation",
+    "AI Agent Testing",
+    "GenAI Testing",
+    "Prompt Testing",
+    "Prompt Evaluation",
+    "Promptfoo",
+    "AI/CV Application Testing",
+    "Human Data Workflows",
+    "AI Agent Evaluation"
+  ],
+  "education": [
+    "Btech"
+  ],
+  "notice_period": "90 days",
+  "expected_salary": "18 LPA",
+  "current_salary": "13 LPA",
+  "work_authorization": "Yes",
+  "preferred_locations": [
+    "Hyderabad",
+    "Remote"
+  ],
+  "remote_preference": "Remote / Hybrid/ onsite"
+}

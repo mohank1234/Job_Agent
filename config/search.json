@@ -1,0 +1,10 @@
+{
+  "role_keywords": ["QA Engineer", "Senior QA Engineer", "Software QA Engineer", "QA Analyst", "QA Lead", "Test Engineer", "Test Lead", "Test Analyst", "SDET", "Software Development Engineer in Test", "Automation QA Engineer", "Test Automation Engineer", "Quality Engineer", "Quality Analyst", "AI QA Engineer", "AI Test Engineer", "ML Test Engineer", "LLM Testing", "RAG Testing", "AI Agent Testing", "GenAI Testing"],
+  "locations": ["Hyderabad", "Remote", "Bengaluru", "India"],
+  "location_priority": ["Hyderabad", "Remote", "Bangalore"],
+  "sources": ["linkedin", "company", "greenhouse", "lever", "ashby"],
+  "max_age_hours": 24,
+  "priority_window_hours": 8,
+  "min_job_experience_years": 4,
+  "exclude_internships": true
+}

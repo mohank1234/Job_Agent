@@ -1,0 +1,915 @@
+"""One resumable search-and-draft run per IST date, with a 06:00-14:00 gate."""
+from __future__ import annotations
+
+import concurrent.futures
+import dataclasses
+import hashlib
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import httpx
+import yaml
+
+from jobagent import discovery
+from jobagent.models import Job, infer_workplace
+from jobagent.output import QA_TITLE, partition, make_workbook
+from jobagent.outreach.verification import board_ref, canonical, fetch_board, verify_row, csv_text, evidence_markdown, employer_posting, get_public
+from jobagent.runtime import atomic_json, now_iso, process_lock
+
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
+ROOT = Path(__file__).resolve().parents[1]
+STATE = ROOT / "research" / "morning-private"
+BOARD_URLS = {"greenhouse": "https://job-boards.greenhouse.io/{}/jobs",
+              "lever": "https://jobs.lever.co/{}", "ashby": "https://jobs.ashbyhq.com/{}",
+              "phonepe": "https://www.phonepe.com/careers/job-openings/"}
+BOARD_ALIASES = {('greenhouse','ocrolus'):('greenhouse','ocrolusinc'),
+                 ('greenhouse','phonepe'):('phonepe','phonepe')}
+# The YC actor's own maximum per run (see jobagent/enrich/apify_yc.py).
+YC_ALL_ITEMS = 200
+EXPERIENCE = re.compile(r"(?<![\d.])(\d{1,2})(?:\s*(?:[-\u2013\u2014]|to)\s*(\d{1,2}))?\s*(\+)?\s*(?:years?|yrs?)\b", re.I)
+
+
+# Daily run window in IST. GitHub often starts scheduled runs late (on
+# 2026-09-29 the first start came 55 minutes late and two were dropped), so a
+# late start still has until 14:00 to do the day's work.
+WINDOW_START_HOUR, WINDOW_END_HOUR = 6, 14
+WINDOW = f"{WINDOW_START_HOUR:02d}:00 <= IST < {WINDOW_END_HOUR:02d}:00"
+
+
+def in_window(now):
+    return WINDOW_START_HOUR <= now.astimezone(IST).hour < WINDOW_END_HOUR
+
+
+def day_key(now):
+    return now.astimezone(IST).date().isoformat()
+
+
+def read_json(path, default):
+    return json.loads(Path(path).read_text(encoding="utf-8")) if Path(path).exists() else default
+
+
+def experience_focus(text, low=4, high=6, years=None):
+    """Minimum experience, not a coincidental years count in a company bio.
+
+    An explicit open-ended "X+ years" requirement is satisfied whenever the
+    candidate's own `years` meet or exceed X, even if X itself falls below
+    the low-high focus window - "3+ years" plainly includes a 5-year
+    candidate. A bounded range like "4-6 years" (no plus) or a plain number
+    is still judged strictly against low-high, unchanged. Pass `years` to
+    enable this; omitting it preserves the old strict-window-only behavior.
+    """
+    heading = re.search(r"(?:requirements|qualifications|what you.ll (?:need|bring)|what we.re looking for)", text, re.I)
+    portion = text[heading.start():] if heading else text
+    general, specialist = [], []
+    for m in EXPERIENCE.finditer(portion):
+        # Use a local sentence/line so '8 years QA; 4 years Python' is not
+        # incorrectly promoted by the specialist number.
+        left = max(portion.rfind("\n", 0, m.start()), portion.rfind(". ", 0, m.start()), portion.rfind(";", 0, m.start()))
+        right = re.search(r"[\n;]|\.\s", portion[m.end():])
+        stop = m.end() + right.start() if right else min(len(portion), m.end() + 170)
+        excerpt = portion[max(left + 1, m.start() - 75):stop].strip()
+        context = excerpt.lower()
+        if not re.search(r"experience|\bqa\b|\bsdet\b|testing|quality assurance|quality engineering|test automation", context):
+            continue
+        open_ended = bool(m.group(3)) and not m.group(2)  # "X+", not a bounded "X-Y" range
+        record = (int(m.group(1)), excerpt[:260], open_ended)
+        if re.search(r"professional|overall|total|software (?:quality|testing|test|engineering)|quality (?:assurance|engineering)|automated testing|\bqa\b|\bsdet\b|test (?:engineering|automation)", context):
+            general.append(record)
+        elif re.search(r"python|java|typescript|playwright|selenium|aws|leadership|manag", context):
+            specialist.append(record)
+        elif "experience" in context:
+            general.append(record)
+    if not general:
+        return "Not stated clearly", " | ".join(v for _, v, _ in specialist)
+    minimum = max(n for n, _, _ in general)
+    evidence = " | ".join(dict.fromkeys(v for _, v, _ in general))
+    if low <= minimum <= high:
+        return "4-6 year minimum", evidence
+    if years is not None and minimum <= years and any(n == minimum and open_ended for n, _, open_ended in general):
+        return "4-6 year minimum", evidence
+    return "Outside 4-6 year focus", evidence
+
+
+def board_directory(companies, extra_urls=()):
+    result = {}
+    for vendor, slugs in companies.items():
+        if vendor not in BOARD_URLS or not isinstance(slugs, list):
+            continue
+        for slug in slugs:
+            if isinstance(slug, str) and re.fullmatch(r"[A-Za-z0-9_-]+", slug):
+                actual = BOARD_ALIASES.get((vendor,slug),(vendor,slug))
+                result[actual] = BOARD_URLS[actual[0]].format(actual[1])
+    for url in extra_urls:
+        ref = board_ref(url)
+        if ref:
+            ref = BOARD_ALIASES.get(ref,ref)
+            result[ref] = BOARD_URLS[ref[0]].format(ref[1])
+    return result
+
+
+def phonepe_board(client):
+    # This is the feed used by PhonePe's public careers frontend. Its status
+    # filter is essential: never treat non-public/internal records as openings.
+    source = 'https://www.phonepe.com/apollo/job-postings/latest.json'
+    data = get_public(client,source).json()
+    if not isinstance(data.get('results'),list):
+        raise ValueError('PhonePe public feed has no results array')
+    jobs = [Job(company='phonepe',source='phonepe',title=r.get('title',''),
+                url=r['applyUrl'],location=r.get('location',''),description='',
+                raw={'status':'PUBLIC','applyUrl':r['applyUrl']})
+            for r in data['results'] if r.get('status')=='PUBLIC' and r.get('applyUrl')]
+    # The feed contains discovery metadata, not full JDs. QA URLs, if present,
+    # remain unverified leads until checked at their application source.
+    return jobs, source
+
+
+def _job_dict(job):
+    d = dataclasses.asdict(job)
+    if job.posted_at:
+        d["posted_at"] = job.posted_at.isoformat()
+    return d
+
+
+def _load_job(data):
+    d = dict(data)
+    if d.get("posted_at"):
+        d["posted_at"] = datetime.fromisoformat(d["posted_at"])
+    return Job(**d)
+
+
+def collect_boards(directory, cache_dir, *, workers=6, deadline=None, progress=None, fetch=fetch_board):
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    def one(item):
+        ref, url = item
+        path = cache_dir / (hashlib.sha256(url.encode()).hexdigest()[:20] + ".json")
+        if path.exists():
+            return read_json(path, {})
+        if deadline and datetime.now(timezone.utc) >= deadline:
+            return {"Company": ref[1], "Vendor": ref[0], "Board URL": url, "Status": "Window ended; not attempted", "jobs": []}
+        record = {"Company": ref[1], "Vendor": ref[0], "Board URL": url, "Checked At": now_iso()}
+        try:
+            with httpx.Client(headers={"User-Agent": "JobAgent/1.0 (personal job search)"}) as client:
+                jobs, source = phonepe_board(client) if ref[0]=='phonepe' else fetch(url, client)
+            qa = [j for j in jobs if QA_TITLE.search(j.title)]
+            record.update({"Status": "Fetched", "Source URL": source, "Postings": len(jobs), "QA titles": len(qa), "jobs": [_job_dict(j) for j in qa]})
+        except httpx.HTTPStatusError as exc:
+            record.update({"Status": f"HTTP {exc.response.status_code}", "Postings": 0, "QA titles": 0, "jobs": []})
+        except Exception as exc:
+            record.update({"Status": type(exc).__name__, "Postings": 0, "QA titles": 0, "jobs": []})
+        atomic_json(path, record)
+        return record
+    records = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(one, item) for item in directory.items()]
+        for future in concurrent.futures.as_completed(futures):
+            records.append(future.result())
+            if progress and (len(records) % 20 == 0 or len(records) == len(directory)):
+                progress(f"Company boards checked: {len(records)}/{len(directory)}")
+    records.sort(key=lambda r: (r["Vendor"], r["Company"]))
+    return records
+
+
+def assess_boards(records, profile):
+    rows, cache = [], {}
+    for source in records:
+        if source["Status"] != "Fetched":
+            continue
+        jobs = [employer_posting(_load_job(d), source['Vendor'], source['Company']) for d in source["jobs"]]
+        ref = (source["Vendor"], source["Company"])
+        cache[ref] = (jobs, source["Source URL"])
+        for job in jobs:
+            if not board_ref(job.url):
+                continue
+            row = verify_row({"Company": job.company, "Job Link": job.url}, profile, None, board_cache=cache)
+            # The evidence timestamp is the actual fetch, including after resume.
+            row["JD Verified At"] = source["Checked At"]
+            if (job.workplace == 'remote' and re.search(r'\b(?:us|usa|united states)\b', job.location, re.I)
+                    and not re.search(r'\bindia\b', job.location, re.I)):
+                row['Fit Status'] = 'out_of_scope'
+                row['Fit Notes'] += '; Employer location restricts this remote posting to the US; India eligibility not established'
+            if re.search(r'(?:role|position) (?:is )?(?:open|available|based)[^.]{0,60}(?:across most of the US|United States only|US only)', job.description, re.I):
+                row['Fit Status'] = 'out_of_scope'
+                row['Fit Notes'] += '; JD explicitly restricts remote hiring to the US'
+            focus, evidence = experience_focus(job.description, years=profile.years)
+            row.update({"Experience Focus": focus, "Experience Evidence": evidence})
+            if focus != "4-6 year minimum":
+                if focus.startswith("Outside"):
+                    row["Fit Status"] = "out_of_scope"
+                elif row["Fit Status"] == "in_scope":
+                    row["Fit Status"] = "needs_review"
+                row["Fit Notes"] += "; " + focus
+            impact = re.findall(r"[^.\n]*(?:own|build|design|evaluation|quality strategy|release readiness)[^.\n]*", job.description, re.I)
+            row["Impact Evidence"] = " | ".join(s.strip()[:350] for s in impact[:3])
+            rows.append(row)
+    seen, unique = set(), []
+    for row in rows:
+        key = canonical(row["Job Link"])
+        if key not in seen:
+            unique.append(row)
+            seen.add(key)
+    return unique
+
+
+def assess_apify_leads(items, profile):
+    """Score Work at a Startup postings (via jobagent.enrich.apify_yc) with
+    the same classify()/rule_match() engine assess_boards uses for company
+    ATS boards - this is an additional source feeding the same pipeline, not
+    a separate/lesser scoring path. Skips the ATS-specific caveats
+    (workplaceType cross-check, gh_jid tracking, jobgether-intermediary
+    detection) verify_row applies, since none of those apply to this data;
+    keeps the generic ones (years-requirement, skill-gap, contract-role,
+    US-only-remote) that assess_boards also applies per row."""
+    from jobagent.roles import classify
+    from jobagent.matcher import rule_match
+    rows = []
+    for item in items:
+        job_id = str(item.get("id") or "").strip()
+        description = (item.get("description") or "").strip()
+        title, company = item.get("title") or "", item.get("company") or ""
+        if not job_id or not title or not company or len(description) < 200:
+            continue
+        # Output schema v2 has url/locations/workType; v1 had location/isRemote.
+        url = item.get("url") or f"https://www.workatastartup.com/jobs/{job_id}"
+        location = item.get("location") or ", ".join(item.get("locations") or [])
+        workplace = (item.get("workType") or ("remote" if item.get("isRemote") else "")
+                     or infer_workplace(location))
+        job = Job(source="workatastartup", company=company, title=title, url=url,
+                  location=location, workplace=workplace, description=description,
+                  salary=item.get("salary") or "", raw=item)
+        job.apply_classification(classify(job, profile))
+        rule_match(job, profile)
+        fit = "in_scope" if job.candidate and job.match_category in ("A", "B", "C") else "out_of_scope"
+        caveats = list(job.classification_notes)
+        requirements = list(dict.fromkeys(re.findall(
+            r"\b\d{1,2}(?:\s*[-–—]\s*\d{1,2})?\+?(?:\s+or more)?\s+years?\b[^.\n]{0,130}", description, re.I)))
+        years = [int(re.match(r"\d+", text).group()) for text in requirements
+                 if re.search(r"experience|testing|automation|quality|QA|SDET", text, re.I)]
+        if years and max(years) > profile.years:
+            caveats.append(f"Posting includes a {max(years)}-year requirement; profile states approximately {profile.years:g} years. Review the full requirements.")
+            if fit == "in_scope":
+                fit = "needs_review"
+        if re.search(r"fixed.term|\bcontract\b", title, re.I):
+            caveats.append("Fixed-term/contract role; confirm duration, benefits and compensation")
+            if fit == "in_scope":
+                fit = "needs_review"
+        mentioned = [s for s in profile.all_skills if re.search(r"(?<!\w)" + re.escape(s) + r"(?!\w)", description, re.I)]
+        gaps = [s for s in profile.gaps if re.search(r"(?<!\w)" + re.escape(s) + r"(?!\w)", description, re.I)]
+        if gaps:
+            caveats.append("Known profile gaps mentioned in JD: " + ", ".join(gaps))
+            if fit == "in_scope":
+                fit = "needs_review"
+        row = {
+            # Same baseline fields verify_row() initializes for every board
+            # row - company research and draft generation access some of
+            # these by direct key, so an Apify row must carry them too.
+            "Previous JD Claim": "", "Previous JD Status": "", "Contact Verification": "unverified",
+            "Contact Verified At": "", "Contact Source URL": "", "Content Status": "needs_review",
+            "Company": company, "Job Title": title, "Location": location, "Job Link": url,
+            "JD Text": description, "Fit Status": fit, "Workplace": workplace,
+            "Fit Notes": "; ".join(caveats), "Profile Skills Mentioned": ", ".join(mentioned),
+            "Known Gaps Mentioned": ", ".join(gaps),
+            "Experience Requirements (source excerpts)": " | ".join(requirements),
+            "Requirements Excerpt (source)": "",
+            "Salary (source)": job.salary or "Not stated in structured source; check full JD",
+            "Listing Type": "Y Combinator Work at a Startup (verified live posting)",
+            "JD Status": "verified_live", "JD Verified At": now_iso(), "JD Source URL": url,
+            "JD SHA256": hashlib.sha256(description.encode()).hexdigest(),
+            "Rule Score": str(job.score), "Scoring Method": "rules", "Checked At": now_iso(),
+            "Verification Error": "", "Employer Job Link": item.get("companyWebsite") or url,
+            "Duplicate Listing URLs": "", "Location Variants": "",
+            # People the posting names as hiring contacts (often the founders).
+            "Hiring Contacts": json.dumps([{k: c.get(k) or "" for k in ("name", "title", "url")}
+                                           for c in item.get("hiringContacts") or [] if c.get("name")]),
+        }
+        focus, evidence = experience_focus(description, years=profile.years)
+        row.update({"Experience Focus": focus, "Experience Evidence": evidence})
+        if focus != "4-6 year minimum":
+            if focus.startswith("Outside"):
+                row["Fit Status"] = "out_of_scope"
+            elif row["Fit Status"] == "in_scope":
+                row["Fit Status"] = "needs_review"
+            row["Fit Notes"] += "; " + focus
+        if (workplace == "remote" and re.search(r"\b(?:us|usa|united states)\b", location, re.I)
+                and not re.search(r"\bindia\b", location, re.I)):
+            row["Fit Status"] = "out_of_scope"
+            row["Fit Notes"] += "; Employer location restricts this remote posting to the US; India eligibility not established"
+        impact = re.findall(r"[^.\n]*(?:own|build|design|evaluation|quality strategy|release readiness)[^.\n]*", description, re.I)
+        row["Impact Evidence"] = " | ".join(s.strip()[:350] for s in impact[:3])
+        rows.append(row)
+    seen, unique = set(), []
+    for row in rows:
+        key = canonical(row["Job Link"])
+        if key not in seen:
+            unique.append(row)
+            seen.add(key)
+    return unique
+
+
+def augment_manifest(out, names):
+    path = Path(out) / "deliverables.json"
+    data = read_json(path, {"version": 1, "files": []})
+    data["files"] = list(dict.fromkeys([*data["files"], *names]))
+    atomic_json(path, data)
+
+
+def whats_new(tabs, state_dir, today, summary):
+    """Today's change against earlier runs, so an unchanged report is obvious."""
+    open_rows = [*tabs["Ready to review"], *tabs["Fit needs checking"]]
+    path = Path(state_dir) / "company-first-seen.json"
+    companies = read_json(path, {})
+    before = dict(companies)
+    for row in open_rows:
+        key = discovery.company_key(row.get("Company", ""))
+        if key and (key not in companies or row["Date"] < companies[key]):
+            companies[key] = row["Date"]
+    if companies != before:
+        atomic_json(path, companies)
+    new_companies = {discovery.company_key(r.get("Company", "")) for r in tabs["New today"]
+                     if companies.get(discovery.company_key(r.get("Company", ""))) == today}
+    counts = {"new_jobs": len(tabs["New today"]), "still_open": len(open_rows) - len(tabs["New today"]),
+              "new_companies": len(new_companies), "new_contacts": summary.get("new_contacts", 0),
+              "boards_added": summary.get("boards_added", 0)}
+    headline = (f"{counts['new_jobs']} new jobs, {counts['new_companies']} new companies, "
+                f"{counts['new_contacts']} new contacts; {counts['still_open']} still open from earlier. "
+                f"{counts['boards_added']} careers boards added to the watch list.")
+    return counts, headline
+
+
+def prepare_report(out, rows, coverage, research, summary, *, state_dir=STATE, proactive=()):
+    from jobagent.startup_output import enrich_rows, write_outreach
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(IST).date().isoformat()
+    # Proactive enquiries have no job posting, so they join the outreach
+    # shortlist but never the vacancy tabs.
+    shortlist = enrich_rows([*rows, *proactive], research)
+    tabs = partition(rows, first_seen_path=Path(state_dir) / "first-seen.json", today=today)
+    summary.update(checked=len(rows), counts={k: len(v) for k, v in tabs.items()}, startup_shortlist_count=len(shortlist))
+    summary["whats_new"], summary["headline"] = whats_new(tabs, state_dir, today, summary)
+    grid = write_outreach(out, shortlist)
+    atomic_json(out / "startup-research.json", research)
+    (out / "verified.csv").write_text(csv_text(rows), encoding="utf-8-sig")
+    (out / "evidence.md").write_text(evidence_markdown(rows), encoding="utf-8")
+    coverage_fields = ["Company", "Vendor", "Board URL", "Status", "Postings", "QA titles", "Checked At", "Source URL"]
+    coverage_rows = [{k: r.get(k, "") for k in coverage_fields} for r in coverage]
+    (out / "Source Coverage.csv").write_text(csv_text(coverage_rows, coverage_fields), encoding="utf-8-sig")
+    atomic_json(out / "verification.json", summary)
+    atomic_json(out / "Daily Run.json", summary)
+    draft_state = read_json(out / 'Gmail Draft Status.json', {}).get('drafts', [])
+    states = {canonical(d['Job Link']): d for d in draft_state if d.get('Job Link')}
+    email_headers = ['Company', 'Job Title', 'Opening', 'To', 'Email Contact', 'Gmail Status', 'Gmail Drafts',
+                     'Subject', 'Email Draft', 'ATS Match', 'ATS Missing Keywords', 'LinkedIn Note',
+                     'Manager LinkedIn', 'Email Source', 'Recipient Evidence', 'Approval', 'Job Link',
+                     'Resume Attachment']
+    email_rows = []
+    from jobagent.outreach.report_drafts import draft_recipient
+    for row in shortlist:
+        state = states.get(canonical(row['Job Link']), {})
+        recipient = draft_recipient(row)
+        opening = str(row.get('Has Relevant Opening', '')).casefold()
+        opening = ('Proactive enquiry (no public QA opening)' if opening in ('false', 'no')
+                   else 'Current opening' if opening in ('true', 'yes') else 'Current opening (careers board)')
+        email_rows.append([row.get('Company Display Name') or row['Company'], row['Job Title'], opening, recipient,
+                           row.get('Email Contact Name') or row.get('Manager Name', ''),
+                           state.get('Status') or ('Awaiting Gmail draft creation' if recipient else 'Pending contact research; Excel only'),
+                           state.get('Gmail Draft URL', ''), row.get('Cold Email Subject', ''), row.get('Cold Email', ''),
+                           row.get('ATS Match', ''), row.get('ATS Missing Keywords', ''), row.get('LinkedIn Note', ''), row.get('Manager LinkedIn', ''), row.get('Email Source', ''),
+                           row.get('Email Evidence', ''), state.get('Approval') or 'Pending user approval; unsent', row['Job Link'],
+                           state.get('Resume Attachment', '')])
+    linkedin_headers = ['Name', 'Company', 'JD', 'Source', 'LinkedIn ID', 'LinkedIn Link',
+                        'LinkedIn Note', 'LinkedIn Note Length', 'Job Link']
+    linkedin_rows = []
+    for row in shortlist:
+        manager_li, contact_li = row.get('Manager LinkedIn', ''), row.get('Email Contact LinkedIn', '')
+        if manager_li:
+            name, linkedin_url, source = row.get('Manager Name', ''), manager_li, row.get('Manager Source', '')
+        elif contact_li:
+            name, linkedin_url, source = row.get('Email Contact Name', ''), contact_li, row.get('Email Source', '')
+        else:
+            continue
+        slug = re.search(r'linkedin\.com/in/([A-Za-z0-9_%.-]+)', linkedin_url)
+        note = row.get('LinkedIn Note', '')
+        linkedin_rows.append([name, row.get('Company Display Name') or row['Company'], row['Job Title'],
+                              source, slug.group(1) if slug else '', linkedin_url,
+                              note, str(len(note)), row['Job Link']])
+    workbook = make_workbook(tabs, summary, extra_grids={
+        "Email drafts": [email_headers, *email_rows],
+        "LinkedIn outreach": [linkedin_headers, *linkedin_rows],
+        "Startup shortlist": grid,
+        "Source coverage": [coverage_fields, *[[r.get(k, "") for k in coverage_fields] for r in coverage_rows]],
+    }, today=today)
+    (out / "JobAgent Report.xlsx").write_bytes(workbook)
+    augment_manifest(out, ["Startup Outreach.csv", "Startup Outreach.md", "startup-research.json", "Source Coverage.csv", "Daily Run.json"])
+
+
+def daily_work(config, profile, out, run_dir, *, deadline=None, progress=print):
+    from jobagent.enrich.exa import exa_search
+    from jobagent.llm import make_provider
+    from jobagent.outreach.daily_research import candidate_facts, research_company, cached_draft, remaining, META
+    from jobagent.outreach import daily_research as daily_research_module
+    cfg = config.get('morning', {})
+    out, run_dir = Path(out), Path(run_dir)
+    progress('Morning step 1: search jobs, check full descriptions, and prepare the Excel report.')
+    issues = []
+    state_dir = run_dir.parent
+    today = datetime.now(IST).date()
+    # Zero-cost by default: pay-per-use services (the Apify actors) run only
+    # when billing.allow_paid_services is true, and web search is held inside
+    # Exa's free monthly credit.
+    billing = config.get('billing', {})
+    allow_paid = bool(billing.get('allow_paid_services', False))
+    from jobagent.enrich import exa
+    exa.configure_budget(state_dir / 'exa-usage.json', None if allow_paid else billing.get('exa_monthly_limit_usd', 8.0))
+    if not allow_paid:
+        progress('Free-only mode: paid services (Apify YC search, email verification) are off; '
+                 'web search stays inside the free monthly credit.')
+    llm_base = config.get('llm', {})
+    # A research prompt carries up to ~120k characters of source pages; hosted
+    # models measured 30-60 seconds on those, so a shorter cap abandoned calls
+    # that were about to succeed. A local model needs its full timeout.
+    research_timeout = llm_base.get('research_timeout_seconds',
+                                    llm_base.get('timeout_seconds', 900) if llm_base.get('provider') == 'ollama' else 90)
+    llm_config = {**llm_base, 'timeout_seconds': research_timeout, 'max_tokens': 5000}
+    provider = None
+    try:
+        provider = make_provider(llm_config)
+    except Exception as exc:
+        issues.append({'stage': 'research_provider', 'error': type(exc).__name__})
+    discovery_path = run_dir / 'discovery.json'
+    if not discovery_path.exists():
+        results, errors = [], []
+        # Fixed configured searches, plus profile-built searches that change
+        # daily and only return ATS pages, so every hit names a careers board.
+        rotating = discovery.daily_job_queries(profile, today, cfg.get('rotating_queries', 6))
+        searches = [(q, {}) for q in cfg.get('discovery_queries', [])]
+        searches += [(q, {'include_domains': discovery.ATS_DOMAINS}) for q in rotating]
+        for query, extra in searches:
+            remaining(deadline)
+            try:
+                results.extend(exa_search(query, 10, max_characters=1500, **extra))
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        atomic_json(discovery_path, {'queries': [q for q, _ in searches], 'results': results,
+                                     'errors': errors, 'checked_at': now_iso()})
+    found = read_json(discovery_path, {})
+    issues += [{'stage': 'discovery', 'error': e} for e in found.get('errors', [])]
+    growth_path = run_dir / 'new-companies.json'
+    if not growth_path.exists():
+        progress('Looking for newly funded and fast-growing companies.')
+        errors, names, results = [], [], []
+        queries = discovery.daily_growth_queries(profile, today, cfg.get('growth_queries', 3))
+        for query in queries:
+            remaining(deadline)
+            try:
+                results.extend(exa_search(query, 10, max_characters=3000,
+                                          start_published_date=discovery.recent_cutoff(today, 30)))
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        if results and provider is None:
+            errors.append('NoLanguageModel')
+        try:
+            names = discovery.extract_companies(provider, results, max_prompt_chars=llm_base.get('max_prompt_chars'))
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+        leads_path = state_dir / 'company-leads.json'
+        known = read_json(leads_path, {})
+        boards = discovery.find_new_boards(names, known, search=exa_search,
+                                           max_search=cfg.get('board_lookup_searches'),
+                                           remaining=lambda: remaining(deadline))
+        atomic_json(leads_path, known)
+        atomic_json(growth_path, {'queries': queries, 'companies': names, 'boards': boards,
+                                  'errors': errors, 'checked_at': now_iso()})
+    growth = read_json(growth_path, {})
+    issues += [{'stage': 'company_discovery', 'error': e} for e in growth.get('errors', [])]
+    progress(f"Company discovery: {len(growth.get('companies', []))} companies named in recent news; "
+             f"{len(growth.get('boards', []))} new careers boards found.")
+    seeds = read_json(run_dir.parent / 'seed-research.json', {'roles': []})
+    old = read_json(out / 'startup-research.json', {'roles': []})
+    company_key = lambda name: re.sub(r'[^a-z0-9]', '', name.casefold())
+    by_company = {company_key(r['Company']): r for r in [*seeds['roles'], *old['roles']]}
+    reviewed = read_json(ROOT / cfg['reviewed_contacts_file'], {}) if cfg.get('reviewed_contacts_file') else {}
+    hn_path = run_dir / 'hn-hiring.json'
+    if not hn_path.exists():
+        from jobagent.sources import hn_hiring
+        try:
+            atomic_json(hn_path, {'posts': hn_hiring.latest_posts(), 'error': None})
+        except Exception as exc:
+            atomic_json(hn_path, {'posts': [], 'error': type(exc).__name__})
+    hn = read_json(hn_path, {'posts': []})
+    if hn.get('error'):
+        issues.append({'stage': 'hn_who_is_hiring', 'error': hn['error']})
+    hn_posts = hn.get('posts', [])
+    watched = read_json(run_dir.parent / 'discovered-boards.json', [])
+    urls = [r['url'] for r in found.get('results', [])]
+    urls += growth.get('boards', [])
+    urls += [u for p in hn_posts for u in p.get('boards', [])]
+    urls += [r['Job Link'] for r in old['roles']]
+    urls += watched
+    directory = board_directory(yaml.safe_load((ROOT / 'companies.yaml').read_text(encoding='utf-8')), urls)
+    # A resumed run uses its fixed source inventory, so a retry is not a second search.
+    directory_path = run_dir / 'directory.json'
+    added_path = run_dir / 'boards-added.json'
+    if directory_path.exists():
+        directory = {(r['vendor'], r['slug']): r['url'] for r in read_json(directory_path, [])}
+    else:
+        atomic_json(added_path, sorted(set(directory.values()) - set(watched)))
+        atomic_json(directory_path, [{'vendor': k[0], 'slug': k[1], 'url': v} for k, v in directory.items()])
+    boards_added = read_json(added_path, [])
+    if boards_added:
+        progress(f'{len(boards_added)} careers boards added to the permanent watch list today.')
+    atomic_json(run_dir.parent / 'discovered-boards.json', sorted(set(directory.values())))
+    coverage = collect_boards(directory, run_dir / 'boards', workers=cfg.get('workers', 6), deadline=deadline, progress=progress)
+    remaining(deadline)
+    all_rows = assess_boards(coverage, profile)
+    apify_cfg = cfg.get('apify_yc', {})
+    if apify_cfg.get('enabled') and allow_paid:
+        remaining(deadline)
+        apify_path = run_dir / 'apify-yc.json'
+        if not apify_path.exists():
+            try:
+                from jobagent.enrich.apify_yc import fetch_yc_jobs
+                from jobagent.enrich.apify_yc import MAX_QUERIES
+                # A query must match every word, so short terms find the most.
+                # Configured terms plus the profile's short titles; a pool
+                # longer than the actor's 20-query limit rotates daily.
+                short_titles = [t for t in discovery.profile_terms(profile)[0] if len(t.split()) <= 3]
+                pool = [*(apify_cfg.get('queries') or ['QA', 'SDET', 'quality engineer', 'software test engineer']),
+                        *short_titles]
+                # Every matching posting up to the actor's maximum. The charge
+                # ceiling only guards against a runaway run: it covers the
+                # whole allowance at the published per-job price.
+                items = fetch_yc_jobs(discovery.daily_subset(pool, today, MAX_QUERIES),
+                                       max_items=YC_ALL_ITEMS,
+                                       max_total_charge_usd=max(apify_cfg.get('max_total_charge_usd', 0), YC_ALL_ITEMS * 0.0025 + 0.1))
+                atomic_json(apify_path, {'items': items, 'error': None, 'checked_at': now_iso()})
+            except Exception as exc:
+                atomic_json(apify_path, {'items': [], 'error': type(exc).__name__, 'checked_at': now_iso()})
+        apify_state = read_json(apify_path, {'items': [], 'error': None})
+        if apify_state.get('error'):
+            issues.append({'stage': 'apify_yc', 'error': apify_state['error']})
+        else:
+            apify_rows = assess_apify_leads(apify_state.get('items', []), profile)
+            all_rows.extend(apify_rows)
+            progress(f'Y Combinator Work at a Startup (via Apify): {len(apify_rows)} QA-relevant postings found.')
+    # Startup-first: hiring YC startups of 10-200 people are checked for a
+    # relevant QA opening on their careers board or website. Openings join
+    # today's jobs; the rest are candidates for a proactive enquiry.
+    from jobagent.outreach import startup_pipeline
+    founder_cfg = cfg.get('founder_emails', {})
+    startup_cfg = {'enabled': True, 'max_companies': 30, 'min_employees': founder_cfg.get('min_employees', 10),
+                   'max_employees': founder_cfg.get('max_employees', 200), **cfg.get('startups', {})}
+    unsent = {str(e.get('domain') or '') for e in read_json(ROOT / 'gmail_report_drafts.json', {}).values()
+              if isinstance(e, dict) and e.get('state') in ('drafted', 'pending') and e.get('domain')}
+    try:
+        startups, startup_checks = startup_pipeline.discover(startup_cfg, profile, run_dir, all_rows, coverage,
+                                                             remaining=lambda: remaining(deadline), progress=progress,
+                                                             keep_domains=unsent)
+    except TimeoutError:
+        raise
+    except Exception as exc:
+        issues.append({'stage': 'startup_discovery', 'error': type(exc).__name__})
+        startups, startup_checks = [], []
+    progress(f'Startups checked for QA openings: {len(startup_checks)}; '
+             f'{sum(bool(c.get("has_relevant_opening")) for c in startup_checks)} with a relevant opening, '
+             f'{len(startups)} for a proactive enquiry.')
+    from jobagent.report_quality import deduplicate_opportunities, resume_skill_text, review_frameworks
+    resume_text = resume_skill_text(ROOT / 'resume' / 'resume_data.py')
+    all_rows = [review_frameworks(r, resume_text) for r in all_rows]
+    raw_assessed_count = len(all_rows)
+    all_rows, duplicate_rows = deduplicate_opportunities(all_rows)
+    relevant = [r for r in all_rows if r['Fit Status'] != 'out_of_scope']
+    focus = [r for r in relevant if r['Experience Focus'] == '4-6 year minimum']
+    progress(f'Assessed {len(all_rows)} QA-related postings; {len(focus)} match the experience and location focus; {len(relevant)-len(focus)} need experience clarification.')
+    for r in coverage:
+        if r['Status'] != 'Fetched':
+            issues.append({'stage': 'board', 'company': r['Company'], 'error': r['Status']})
+    # Keep all decision reasons visible, even when full descriptions exceed the
+    # readable-report cap. Every source job is accounted for in this ledger.
+    decision_fields = ['Company', 'Job Title', 'Location', 'Job Link', 'JD Status', 'Fit Status', 'Fit Notes', 'Experience Focus', 'Experience Evidence']
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'Duplicate Listings.csv').write_text(csv_text(duplicate_rows, ['Company','Job Title','Duplicate URL','Kept URL','Reason']), encoding='utf-8-sig')
+    (out / 'All Job Decisions.csv').write_text(csv_text([{k: r.get(k, '') for k in decision_fields} for r in all_rows], decision_fields), encoding='utf-8-sig')
+    unsupported = [{'Company': s['Company'], 'Job Title': j['title'], 'Job Link': j['url'],
+                    'Status': 'External posting URL; not verified by supported ATS adapter'}
+                   for s in coverage for j in s.get('jobs', []) if not board_ref(employer_posting(_load_job(j),s['Vendor'],s['Company']).url)]
+    discovery_rows = [{'Company': '', 'Job Title': r['title'], 'Job Link': r['url'],
+                       'Status': 'Search discovery only; check All Job Decisions for a verified match'} for r in found.get('results', [])]
+    (out / 'Discovery Leads.csv').write_text(csv_text([*unsupported, *discovery_rows], ['Company', 'Job Title', 'Job Link', 'Status']), encoding='utf-8-sig')
+    facts = candidate_facts(ROOT / 'resume' / 'resume_data.py')
+    facts['phone'] = str(cfg.get('signature_phone') or '').strip()
+    resume_path = ROOT / cfg['resume_attachment'] if cfg.get('resume_attachment') else None
+    if resume_path:
+        from jobagent.outreach.report_drafts import load_resume
+        load_resume(resume_path)
+    # Each outreach email gets a PDF resume tailored to its job description
+    # (reordered and emphasised, never added to); the configured file is the
+    # fallback when the resume data cannot be read.
+    from jobagent.outreach import tailored_resume
+    try:
+        facts['resume'] = tailored_resume.load_resume_data(ROOT / 'resume' / 'resume_data.py')
+    except Exception as exc:
+        issues.append({'stage': 'tailored_resume', 'error': type(exc).__name__})
+    facts['resume_attached'] = bool(resume_path or facts.get('resume'))
+    metadata = {}
+    # Fresh companies first: a company already contacted is left to the
+    # follow-up step, and one researched on a recent earlier day waits until
+    # companies not yet looked at have had their turn.
+    today_iso = today.isoformat()
+    first_seen = read_json(state_dir / 'first-seen.json', {})
+    ledger = read_json(ROOT / 'gmail_report_drafts.json', {})
+    history_path = state_dir / 'company-history.json'
+    history = read_json(history_path, {})
+    cooldown = discovery.recent_cutoff(today, cfg.get('research_cooldown_days', 14))
+    def contacted(row):
+        # Sent, or its draft sent/deleted by the user in Gmail ("absent"). An
+        # unsent draft stays in the report so it can still be sent.
+        entry = ledger.get(hashlib.sha256(company_key(row['Company']).encode()).hexdigest()[:24], {})
+        return entry.get('state') in ('sent', 'absent')
+    # Startups of about 10-200 people come first: their founders and CTO
+    # usually hire directly. Size is read once a month per company.
+    from jobagent.outreach import founders
+    email_cfg = cfg.get('founder_emails', {})
+    target = (email_cfg.get('min_employees', 10), email_cfg.get('max_employees', 200))
+    sizes_path = state_dir / 'company-size.json'
+    sizes = read_json(sizes_path, {})
+    size_recheck = discovery.recent_cutoff(today, 30)
+    # The YC directory states team size, so those startups need no search.
+    for check in startup_checks:
+        c = check['company']
+        sizes[company_key(c['name'])] = {'Employee Count': str(c['team_size']), 'Employee Count Source': c.get('url', ''),
+                                         'low': c['team_size'], 'high': c['team_size'], 'checked': today_iso}
+    for company in dict.fromkeys(r['Company'] for r in focus if not contacted(r)):
+        ck = company_key(company)
+        if sizes.get(ck, {}).get('checked', '') >= size_recheck:
+            continue
+        remaining(deadline)
+        try:
+            found_size = founders.company_size(company, exa_search)
+        except Exception as exc:
+            issues.append({'stage': 'company_size', 'company': company, 'error': type(exc).__name__})
+            continue
+        label = found_size.get('Employee Count', '')
+        low, _, high = label.partition('-')
+        sizes[ck] = {**found_size, 'checked': today_iso,
+                     **({'low': int(low), 'high': int(high or low)} if label else {})}
+    atomic_json(sizes_path, sizes)
+    def size_rank(row):
+        known = sizes.get(company_key(row['Company']), {})
+        if 'low' not in known:
+            return 1
+        return 0 if founders.in_target((known['low'], known['high']), *target) else 2
+    def freshness(row):
+        last = history.get(company_key(row['Company']), {}).get('researched', '')
+        return (contacted(row), cooldown <= last < today_iso, size_rank(row),
+                first_seen.get(canonical(row['Job Link']), today_iso) != today_iso)
+    # Previously evidenced startups get first attention; no salary-based bonus.
+    focus.sort(key=lambda r: (*freshness(r), not bool(by_company.get(company_key(r['Company']), {}).get('Investment Source')),
+                              r['Fit Status'] != 'in_scope', -float(r.get('Rule Score') or 0)))
+    # No company-count cap: every fresh company is researched while time
+    # allows, and research stops early enough to leave time for the report.
+    research_until = deadline - timedelta(minutes=cfg.get('report_reserve_minutes', 20)) if deadline else None
+    for row in focus:
+        key = row['Company'].casefold()
+        if contacted(row) or key in metadata:
+            continue
+        if research_until and datetime.now(timezone.utc) >= research_until:
+            issues.append({'stage': 'company_research', 'error': 'StoppedToLeaveTimeForReport'})
+            break
+        remaining(deadline)
+        progress(f'Researching public leadership and investor evidence: {row["Company"]}')
+        metadata[key] = research_company(row, run_dir / 'companies', provider, seed=by_company.get(company_key(key)),
+                                         deadline=deadline, max_prompt_chars=llm_base.get('max_prompt_chars'))
+        from jobagent.outreach.daily_research import apply_reviewed_contact
+        metadata[key] = apply_reviewed_contact(metadata[key], reviewed.get(company_key(key)))
+        issues += [{'stage': 'company_research', 'company': row['Company'], 'error': e} for e in metadata[key].get('_errors', [])]
+    for key, meta in metadata.items():
+        # Failed research is not research: the company stays at the front
+        # of the queue instead of waiting out the cooldown.
+        if meta.get('_errors'):
+            if history.get(company_key(key), {}).get('researched') == today_iso:
+                history[company_key(key)].pop('researched')
+        else:
+            history.setdefault(company_key(key), {})['researched'] = today_iso
+    atomic_json(history_path, history)
+    for key, meta in metadata.items():
+        known = sizes.get(company_key(key), {})
+        meta.update({'Employee Count': known.get('Employee Count', ''),
+                     'Employee Count Source': known.get('Employee Count Source', '')})
+    # Free: an address the company itself published for applicants in a
+    # Hacker News "Who is hiring?" post.
+    from jobagent.sources import hn_hiring
+    for row in focus:
+        meta = metadata.get(row['Company'].casefold())
+        if meta is not None and not meta.get('Public Work Email'):
+            ref = board_ref(row.get('Job Link', ''))
+            contact = hn_hiring.contact_for(row['Company'], [ref[1]] if ref else [], hn_posts)
+            if contact:
+                meta.update(contact, **{'Email Ownership Checked At': now_iso()})
+                progress(f"Hiring email published by {row['Company']} on Hacker News: {contact['Public Work Email']}")
+    # Verified leadership emails - founder / CTO / CEO for 10-200 person
+    # startups - from Hunter, then Apollo (free plans, capped), cached per
+    # domain. Openings are enriched before proactive startups, so the scarce
+    # free lookups go to real vacancies first.
+    lookups_path = state_dir / 'founder-emails.json'
+    lookups = read_json(lookups_path, {})
+    for s in startups:
+        metadata.setdefault(s['Company'].casefold(), {
+            **{k: s.get(k, '') for k in META}, 'Domain': s['Domain'],
+            '_sources': [{'url': s['Website']}], 'Research Checked At': now_iso()})
+    if founder_cfg.get('enabled', True):
+        issues += startup_pipeline.enrich_contacts(
+            [*focus, *startups], metadata, sizes, lookups, founder_cfg, state_dir, today,
+            search=exa_search, allow_paid=allow_paid, contacted=contacted,
+            remaining=lambda: remaining(deadline), progress=progress)
+        atomic_json(sizes_path, sizes)
+    verified_contacts = sum(bool(founders.verified_leadership_contact(m)) for m in metadata.values())
+    progress(f'Verified founder/CTO/CEO emails available today: {verified_contacts}.')
+    def priority(row):
+        meta = metadata.get(row['Company'].casefold(), {})
+        backing = 0 if re.fullmatch(r'[WSFX]\d{2,4}', meta.get('YC Batch', '').strip(), re.I) or 'y combinator' in meta.get('Investor Backing', '').lower() else 1 if meta.get('Investment Source') else 2
+        return (*freshness(row), backing, row['Fit Status'] != 'in_scope', -float(row.get('Rule Score') or 0))
+    focus.sort(key=priority)
+    roles, drafted_companies, reused = [], set(), 0
+    import shutil
+    shutil.rmtree(out / 'resumes', ignore_errors=True)  # rebuilt for today's rows
+    for row in focus:
+        remaining(deadline)
+        key = row['Company'].casefold()
+        default = 'Already contacted; follow-up only' if contacted(row) else 'Research budget reached; no contact claim'
+        meta = metadata.get(key, {'Research Checked At': now_iso(), 'Contact Status': default})
+        row.update({k: meta.get(k, '') for k in META})
+        if contacted(row) or key in drafted_companies:
+            continue
+        draft, cached = cached_draft(row, meta, facts, run_dir.parent / 'drafts')
+        reused += int(cached)
+        roles.append({'Company': row['Company'], 'Job Link': row['Job Link'],
+                      **{k: meta.get(k, '') for k in META}, **draft,
+                      **{f: row[f] for f in startup_pipeline.STARTUP_FIELDS if f in row},
+                      'Draft JD SHA256': row['JD SHA256'], 'Requires Fit Review': row['Fit Status'] != 'in_scope'})
+        if facts.get('resume'):
+            try:
+                roles[-1].update(tailored_resume.build_for_row(facts['resume'], row, out))
+            except Exception as exc:
+                issues.append({'stage': 'tailored_resume', 'company': row['Company'], 'error': type(exc).__name__})
+        drafted_companies.add(key)
+    # Proactive enquiries to startups with no relevant opening: only with a
+    # verified founder/CTO/CEO email (no blank-To drafts), one per company.
+    proactive_rows = []
+    for s in startups:
+        key = s['Company'].casefold()
+        meta = metadata.get(key, {})
+        if contacted(s) or key in drafted_companies or not founders.verified_leadership_contact(meta, s['Domain']):
+            continue
+        company = {**s['_startup'], 'description': s.get('JD Text', '')}
+        draft = daily_research_module.proactive_draft(company, meta, facts)
+        roles.append({'Company': s['Company'], 'Job Link': s['Job Link'], **{k: meta.get(k, '') for k in META}, **draft,
+                      **{f: s[f] for f in startup_pipeline.STARTUP_FIELDS if f in s}, 'Has Relevant Opening': False,
+                      'Draft JD SHA256': s['JD SHA256'], 'Requires Fit Review': False})
+        if facts.get('resume'):
+            text = ' '.join([company.get('one_liner', ''), *company.get('tags', []), *company.get('industries', [])])
+            try:
+                roles[-1].update(tailored_resume.build_for_row(
+                    facts['resume'], {'Company': s['Company'], 'Job Title': 'Senior QA / SDET', 'JD Text': text,
+                                      'Job Link': s['Job Link']}, out))
+            except Exception as exc:
+                issues.append({'stage': 'tailored_resume', 'company': s['Company'], 'error': type(exc).__name__})
+        proactive_rows.append(s)
+        drafted_companies.add(key)
+    if proactive_rows:
+        progress(f'Proactive enquiries prepared for {len(proactive_rows)} startups with a verified leadership email.')
+    from jobagent.outreach.report_drafts import draft_recipient
+    new_contacts = sum(bool(draft_recipient(r)) for r in roles)
+    others = [r for r in relevant if r not in focus]
+    excluded = [r for r in all_rows if r['Fit Status'] == 'out_of_scope']
+    selected = [*focus, *others, *excluded][:cfg.get('max_report_rows', 150)]
+    summary = {'schema_version': 1, 'checked_at': now_iso(), 'status': 'partial' if issues else 'ok',
+               'scope': 'Separate employer careers boards across Greenhouse, Lever and Ashby; broader search results are discovery leads until verified. Full JDs preserved for report rows.',
+               'issues': issues, 'leads_not_checked': len(unsupported),
+               'applications': 'No applications submitted by this search-and-draft workflow',
+               'replies': 'Not measured; drafts require explicit user approval before sending',
+               'company_boards': len(coverage), 'boards_fetched': sum(s['Status'] == 'Fetched' for s in coverage),
+               'postings_seen': sum(s.get('Postings', 0) for s in coverage),
+               'qa_title_candidates': sum(s.get('QA titles', 0) for s in coverage),
+               'qa_postings_assessed': len(all_rows), 'external_posting_urls_unverified': len(unsupported),
+               'raw_postings_assessed': raw_assessed_count, 'duplicate_listings_grouped': len(duplicate_rows),
+               'focus_roles': len(focus), 'experience_needs_clarification': len(others),
+               'full_jds_omitted_from_display': max(0, len(all_rows)-len(selected)),
+               'drafts': len(roles), 'reused_drafts': reused, 'companies_researched': len(metadata),
+               'new_contacts': new_contacts, 'boards_added': len(boards_added),
+               'startups_checked': len(startup_checks),
+               'startups_with_relevant_opening': sum(bool(c.get('has_relevant_opening')) for c in startup_checks),
+               'proactive_enquiries': len(proactive_rows),
+               'companies_10_to_200_employees': sum(size_rank({'Company': c}) == 0 for c in {r['Company'] for r in focus}),
+               'verified_founder_emails': sum(bool((m.get('Email Ownership Status') or '').startswith('Verified deliverable'))
+                                              for m in metadata.values()),
+               'companies_found_in_news': len(growth.get('companies', [])),
+               'search_queries': found.get('queries', []) + growth.get('queries', []),
+               'public_emails': sum(bool(r.get('Public Work Email')) for r in roles),
+               'manager_profiles': sum(bool(r.get('Manager LinkedIn')) for r in roles),
+               'investor_evidenced_companies': sum(bool(r.get('Investment Source')) for r in roles),
+               'compensation_filter': False, 'experience_rule': 'Stated minimum of 4, 5 or 6 years; exact range remains visible',
+               'schedule': f'{WINDOW} (Asia/Kolkata); at most one completed run per IST date',
+               'workflow_order': ['Job search and Excel report', 'Gmail drafts' if cfg.get('gmail_drafts') else 'Gmail drafts disabled', 'Drive publication'],
+               'approval_required': True, 'outreach_sent': 0}
+    notes = ['# Daily job search and outreach', '', f'Checked: {summary["checked_at"]}', '',
+             f'{len(coverage)} employer boards checked, {summary["boards_fetched"]} fetched. This is a count of employer boards, not distinct ATS vendors.',
+             f'{summary["postings_seen"]} postings screened for QA titles; {len(focus)} current roles meet the stated minimum experience and geography focus.',
+             'No compensation filter. Hyderabad onsite/hybrid and India-eligible remote remain the configured preferences. Singapore requires sponsorship review.',
+             'Requirements starting at 4, 5 or 6 years are included; a 5-8-year range is shown exactly. Unstated requirements are a separate review queue.',
+             'Start with New today: jobs first seen in this run. Other tabs list newest first. '
+             'Search terms come from profile.yaml and change daily; companies named in recent funding and growth news '
+             'are looked up and, when a public careers board exists, added to the permanent watch list. '
+             'Companies already contacted are left to follow-ups, and companies researched on a recent earlier day wait behind new ones.',
+             'The Startup shortlist has the outreach. New drafts require your approval. Confirmed sent messages are labeled separately and are not recreated. One draft per company avoids contacting several leaders about the same hire.',
+             'Only outreach with a sourced recipient email becomes a Gmail draft. Outreach with missing contacts stays in Excel for research; historical addresses remain labeled and are not delivery-verified.',
+             'The job search and Excel report finish first, then Gmail drafts are saved, then outputs are published to the same Drive folder.',
+             'Source Coverage.csv records failures and zero-result boards. All Job Decisions.csv keeps all assessed rejection reasons. Discovery Leads.csv contains unverified external links.',
+             'The cloud schedule requests 06:07 IST with 08:07, 10:07 and 12:07 catch-up triggers. A persistent ledger and process lock prevent duplicate completed runs; interrupted runs resume checkpoints. GitHub may delay triggers.',
+             f'Cloud runs do not need the laptop online. Job searches start only within {WINDOW}. Browserbase portal work remains pending separately.', '']
+    (out / 'Research Notes.md').write_text('\n\n'.join(notes), encoding='utf-8')
+    # Export public evidence, never candidate contacts, credentials or caches.
+    evidence = {k: {'metadata': {f: v for f, v in m.items() if not f.startswith('_')},
+                    'sources': m.get('_sources', []), 'errors': m.get('_errors', [])} for k, m in metadata.items()}
+    atomic_json(out / 'Contact Research.json', evidence)
+    prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary, state_dir=state_dir, proactive=proactive_rows)
+    progress(summary['headline'])
+    augment_manifest(out, ['All Job Decisions.csv', 'Discovery Leads.csv', 'Research Notes.md', 'Contact Research.json', 'Duplicate Listings.csv'])
+    if cfg.get('gmail_drafts'):
+        remaining(deadline)
+        progress('Morning step 2: Excel report prepared; now save Gmail drafts for approval.')
+        from jobagent.outreach.report_drafts import sync_report_drafts
+        outreach_gmail_cfg = config.get('outreach', {}).get('gmail', {})
+        auto_send = outreach_gmail_cfg.get('mode') == 'auto_send'
+        try:
+            drafts = sync_report_drafts(out,config.get('drive_output',{}).get('expected_account'),deadline=deadline,resume_path=resume_path,auto_send=auto_send)
+            summary['gmail_drafts'] = {status:sum(d['Status']==status for d in drafts) for status in set(d['Status'] for d in drafts)}
+            if any(d['Status'].startswith('Uncertain draft result') for d in drafts):
+                summary['issues'].append({'stage':'gmail_drafts','error':'UncertainDraftResult'})
+                summary['status'] = 'partial'
+            augment_manifest(out,['Gmail Draft Status.json'])
+        except Exception as exc:
+            summary['issues'].append({'stage':'gmail_drafts','error':type(exc).__name__})
+            summary['status'] = 'partial'
+            atomic_json(out/'Gmail Draft Status.json',{'checked_at':now_iso(),'status':'failed','error':type(exc).__name__,'outreach_sent':0})
+            augment_manifest(out,['Gmail Draft Status.json'])
+        if auto_send:
+            progress('Morning step 2b: checking sent outreach for follow-ups.')
+            from jobagent.outreach.followup import send_followups
+            try:
+                followups = send_followups(config.get('drive_output',{}).get('expected_account'),
+                                           after_days=outreach_gmail_cfg.get('followup_after_days', 5))
+                summary['followups'] = {status:sum(f['status']==status for f in followups) for status in set(f['status'] for f in followups)}
+            except Exception as exc:
+                summary['issues'].append({'stage':'followups','error':type(exc).__name__})
+                summary['status'] = 'partial'
+        prepare_report(out, selected, coverage, {'version': 1, 'roles': roles}, summary, state_dir=state_dir, proactive=proactive_rows)
+    return summary
+
+
+def run_daily(config, profile, out, *, initial=False, now=None, state_dir=STATE, work=None, publish=None, preflight=None, progress=print):
+    now = now or datetime.now(timezone.utc)
+    if not initial and not in_window(now):
+        return {"status": "skipped_outside_window", "date_ist": day_key(now), "window": WINDOW}
+    state_dir = Path(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with process_lock(state_dir / "daily.lock"):
+        key = day_key(now)
+        ledger_path = state_dir / "ledger.json"
+        ledger = read_json(ledger_path, {"version": 1, "days": {}})
+        entry = ledger["days"].get(key, {})
+        if entry.get("status") == "completed":
+            return {"status": "skipped_already_completed", "date_ist": key}
+        if preflight:
+            preflight()  # No job/model calls before a usable network/Drive connection.
+        run_dir = state_dir / key
+        run_dir.mkdir(parents=True, exist_ok=True)
+        entry.update(status="running", initial=initial, started_at=entry.get("started_at") or now_iso())
+        ledger["days"][key] = entry
+        atomic_json(ledger_path, ledger)
+        deadline = None if initial else datetime.combine(now.astimezone(IST).date(), datetime.min.time(), IST).replace(hour=WINDOW_END_HOUR).astimezone(timezone.utc)
+        try:
+            if entry.get("stage") != "prepared":
+                result = work(config, profile, out, run_dir, deadline=deadline, progress=progress)
+                retry_drafts = any(i.get('stage') == 'gmail_drafts' for i in result.get('issues', []))
+                entry.update(stage="retry_drafts" if retry_drafts else "prepared", summary=result)
+                atomic_json(ledger_path, ledger)
+            if deadline and datetime.now(timezone.utc) >= deadline:
+                entry.update(status="window_ended", finished_at=now_iso())
+                atomic_json(ledger_path, ledger)
+                return {"status": "window_ended", "date_ist": key}
+            progress('Morning step 3: job report and draft stage finished; publish outputs to Drive.')
+            publication = publish(out) if publish else None
+            if entry.get('stage') == 'retry_drafts':
+                entry.update(status="partial", finished_at=now_iso(), publication=publication)
+                atomic_json(ledger_path, ledger)
+                return {"status":"partial", "date_ist":key, "summary":entry["summary"], "publication":publication}
+            entry.update(status="completed", finished_at=now_iso(), publication=publication)
+            atomic_json(ledger_path, ledger)
+            return {"status": "completed", "date_ist": key, "summary": entry["summary"], "publication": publication}
+        except Exception as exc:
+            entry.update(status="interrupted", error=type(exc).__name__)
+            atomic_json(ledger_path, ledger)
+            raise

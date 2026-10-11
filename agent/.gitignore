@@ -1,0 +1,63 @@
+# Personal / PII - never commit. Your real career profile, resume content,
+# generated per-job application kits, and researched third-party contact info.
+# resume/tailor.py and resume/build_resume.py ARE tracked - they're generic
+# rendering logic with no personal data (repo audit 2026-09-07 finding #12:
+# gitignoring the whole resume/ directory also gitignored that code, so
+# apply-kit couldn't even be imported on a fresh checkout).
+profile.yaml
+resume/resume_data.py
+resume/*.docx
+resume/*.md
+applications/
+outreach_targets.yaml
+
+# Local runtime config - contains your real mailbox address. config.yaml.example
+# is the tracked, sanitized template - copy it to config.yaml and edit.
+config.yaml
+
+# Gmail OAuth - client secret and the token minted after the first sign-in.
+# Never commit either; both grant access to a real Gmail account.
+credentials.json
+token.json
+drive_token.json
+drive_token.json.*.tmp
+
+# Apify API token - never commit; grants billing-enabled API access.
+apify_token.txt
+drive_output_state.json
+drive_output_state.json.*.tmp
+drive_output_state.lock
+
+# Local state tracking which outreach rows already got a Gmail draft, so
+# re-running draft-outreach doesn't create duplicates. Not secret, just
+# runtime state - like jobs.db, not meant for version control.
+outreach_draft_ledger.json
+outreach_draft_ledger.lock
+outreach_draft_ledger.json.*.tmp
+token.json.*.tmp
+browserbase_contexts.json
+browserbase_contexts.lock
+browserbase_contexts.json.*.tmp
+research/
+
+# Generated / derived data - large, regenerable, not meant for version control.
+jobs.db
+jobs.db.bak-*
+digest_*.md
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.DS_Store
+
+# Claude Code: settings.json is shared project config (tracked); settings.local.json
+# is the per-machine override file, like .env.local - never commit it.
+.claude/settings.local.json
+gmail_report_drafts.json
+gmail_report_drafts.lock
+.jobagent-state.enc

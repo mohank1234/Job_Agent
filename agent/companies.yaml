@@ -1,0 +1,258 @@
+# Target company ATS boards.
+#
+# Every slug below was probed live and returned postings. Re-check periodically:
+#
+#     python run.py verify
+#
+# How to find a company's slug: open their careers page and look at the URL of
+# a job posting.
+#   boards.greenhouse.io/SLUG/jobs/123      -> greenhouse, slug = SLUG
+#   jobs.lever.co/SLUG/uuid                 -> lever
+#   jobs.ashbyhq.com/SLUG/uuid              -> ashby
+#   careers.smartrecruiters.com/SLUG/123    -> smartrecruiters
+#   apply.workable.com/SLUG/j/ABC123        -> workable
+#
+# These five vendors are public, documented JSON APIs. They are the only
+# legitimate programmatic route to job data — Naukri, LinkedIn, Indeed,
+# Foundit, Cutshort, Instahyre, Hirist, Glassdoor and TimesJobs have no public
+# API and prohibit automated access in their terms.
+
+greenhouse:
+  # --- India-headquartered product companies -------------------------------
+  - postman              # Bengaluru
+  - phonepe              # Bengaluru
+  - highradius           # HYDERABAD HQ
+  - netradyne            # Bengaluru
+  - groww                # Bengaluru
+  # Hyderabad startup A-Z list collected from screenshots
+  - bitkraft
+  - crayon
+  - druva
+
+  # --- Global companies with real India / Hyderabad engineering centres -----
+  - zscaler              # Hyderabad + Bengaluru
+  - anaplan              # Hyderabad + Bengaluru
+  - netskope             # Hyderabad + Bengaluru
+  - turing               # remote-first, India-heavy
+  - gitlab               # all-remote
+  - mongodb
+  - datadog
+  - elastic
+  - twilio
+  - mixpanel
+  - amplitude
+  - launchdarkly
+  - algolia
+  - circleci
+
+  # --- AI labs and US product companies (remote roles) ---------------------
+  - anthropic
+  - databricks
+  - stripe
+  - dropbox
+  - airbnb
+  - robinhood
+  - coinbase
+  - reddit
+
+  # --- AI / LLM / GenAI companies -------------------------------------------
+  # NOTE: Meta, Apple, Amazon, Netflix, Google and Microsoft run their own
+  # career portals with no ATS API. There is no legitimate feed for them.
+  - scaleai              # data labelling + model evaluation
+  - xai
+  - cresta               # conversational AI
+  - observeai            # conversational AI
+  - galileo              # LLM evaluation tooling
+  - assemblyai
+  - stabilityai
+  - typeface
+  - instabase
+  - imbue
+
+  # --- YC startup discovery pass (2026-09-06, via yc-oss company directory) -
+  - fivetran             # YC W13 - automated data movement/ELT, 211 live roles
+
+  # --- VC portfolio discovery pass (2026-09-07: Accel/Lightspeed/Peak XV/a16z/Techstars/General Catalyst) -
+  - celonis              # Accel - enterprise process mining/intelligence
+  - checkr               # Accel - AI-assisted background-check automation
+  - snorkelai             # Lightspeed - data-centric AI platform, programmatic labeling/LLM eval
+  - goodfire              # Lightspeed - AI interpretability & model-auditing platform
+  - chainguard            # Lightspeed - secure-by-default OSS container supply chain
+  - endorlabs             # Lightspeed - software dependency risk / AppSec platform
+  - grafanalabs           # Lightspeed - open-source observability & monitoring
+  - atomicwork            # Peak XV - agentic ITSM platform, Bengaluru HQ
+  - togetherai            # a16z - LLM training/serving platform, Bengaluru roles
+  - sendbird              # Techstars - chat/messaging & AI agent APIs
+  - apiiro                # General Catalyst - AppSec code-to-cloud risk, Tel Aviv
+  - buildkite             # General Catalyst - CI/CD platform
+  - bugcrowd              # General Catalyst - crowdsourced security testing
+
+  # --- TIER 1: 30+ LPA employers in India (verified live boards) ------------
+  # From the "quietly paying 30+ LPA" and "high base + RSU" lists. These are
+  # the companies to prioritise; see profile.yaml -> preferences.preferred_companies
+  - okta                 # 104 India roles, hires QA
+  - rubrik               # 26 India roles
+  - gleanwork            # Glean - 20 India roles, 7 QA/eval titles
+  - figma
+  - brex
+  - thoughtworks
+  # --- Hyderabad product companies + A-Z startups (probed live) -----------
+  - cloudflare           # Cloudflare - 310 postings
+  - rockstargames        # Rockstar Games - 68 postings
+  - truveta              # Truveta - 40 postings
+  - zenoti               # Zenoti - 40 postings
+  - pine                 # Pine Labs - 4 postings
+
+  # --- SINGAPORE employers reachable WITHOUT Singpass ----------------------
+  # MyCareersFuture surfaces good Singapore roles but its Apply button is
+  # behind Singpass, which needs an NRIC or FIN — neither of which an overseas
+  # applicant can obtain. Any SG employer that also runs a real ATS should be
+  # listed here instead, so the posting arrives through a board that can
+  # actually be applied to.
+  #
+  # constructortech serves from the EU board (job-boards.eu.greenhouse.io) but
+  # the STANDARD boards-api host answers for it, so no special casing is
+  # needed. Probed live 2026-09-01: 41 postings, 4 in Singapore, including the
+  # same "Technical Automation QA (Playwright / TypeScript)" role that reached
+  # the digest via MyCareersFuture.
+  - constructortech      # Constructor Tech - 41 postings, 4 Singapore
+
+lever:
+  - meesho               # Bengaluru
+  - mindtickle           # Pune / Bengaluru
+  - paytm                # 160 India roles
+  - cred
+  - palantir
+  # --- Hyderabad product companies + A-Z startups (probed live) -----------
+  - veeva                # Veeva Systems - 872 postings
+  - quiq                 # Quiq - 1 postings
+
+  # --- VC portfolio discovery pass (2026-09-07: Lightspeed/Techstars) ------
+  - matillion             # Lightspeed - cloud data integration/ETL
+  - acceldata             # Lightspeed - data observability & reliability
+  - intenseye             # Lightspeed - computer-vision workplace safety monitoring
+  - jumpcloud             # Techstars - unified device/identity/access management
+
+ashby:
+  - spotdraft            # Bengaluru
+  - atlan                # Bengaluru / remote
+  - ramp
+  - linear
+  - vercel
+  - notion
+
+  # --- AI labs, RAG / agent / LLM-eval companies ----------------------------
+  - openai
+  - langchain            # RAG + agent framework; hires QA/eval
+  - mercor
+  - cursor
+  - cognition
+  - poolside
+  - harvey
+  - abridge
+  - decagon              # AI agents
+  - sierra               # AI agents
+  - distyl
+  - pinecone             # vector DB / RAG
+  - weaviate             # vector DB / RAG
+  - llamaindex           # RAG framework
+  - langfuse             # LLM observability + eval
+  - braintrust           # LLM evaluation
+  - fireworks
+  - baseten
+  - modal
+  - deepgram
+  - elevenlabs
+  - synthesia
+  - suno
+  - runway
+  - speak
+  - granola
+  - rogo
+
+  # --- TIER 1: 30+ LPA employers ------------------------------------------
+  - snowflake
+  - uipath               # 7 QA/test titles
+  - confluent
+  - plaid
+  - zapier               # remote-only
+  # --- Hyderabad product companies + A-Z startups (probed live) -----------
+  - nirvana              # Nirvana Finance - 8 postings
+
+  # --- YC startup discovery pass (2026-09-06, via yc-oss company directory) -
+  # QA/test-automation product companies - directly in the target space:
+  - meticulous            # YC S21 - automated e2e screenshot/visual regression testing
+  - momentic              # YC W24 - agentic QA platform for web and mobile
+  - spur                  # YC S24 - "AI QA Engineer", natural-language website testing
+  - escape                # YC W23 - offensive/API security testing platform
+  # AI-agent eval / observability infra - directly eval-adjacent:
+  - raindrop              # YC W24 - "Sentry for AI Agents", production agent monitoring
+  - encord                # YC W21 - data layer for physical AI, labeling/eval infra
+  - mem0                  # YC S24 - memory layer for AI agents
+  - cinder                # YC W22 - AI-abuse trust & safety infra
+  - signoz                # YC W21 - open-source observability, DataDog alternative
+  # AI agent / voice / document products where agent-output QA matters:
+  - legora                # YC W24 - AI workspace for lawyers, 283 open roles
+  - replit                # YC W18 - browser IDE + Replit Agent
+  - taktile               # YC S20 - reliability-critical AI decisioning agents
+  - reducto               # YC W24 - agentic document platform
+  - vapi                  # YC W21 - voice AI developer platform
+  - retell-ai             # YC W24 - voice AI agents for contact centers
+  - roboflow              # YC S20 - computer-vision MLOps, dataset/model eval
+  - tennr                 # YC W23 - healthcare AI agents automating referrals
+  - photoroom             # YC S20 - generative AI photo editing at commerce scale
+  - tavus                 # YC S21 - conversational AI video/avatar platform
+  - cosine                # YC W23 - fully agentic software engineer product
+  # Dev-tools / infra, large and stable:
+  - docker                # YC S10 - core dev-tools platform
+  - supabase              # YC S20 - open-source backend-as-a-service
+  - goteleport            # YC S15 - infrastructure identity/access (Teleport)
+  - mintlify              # YC W22 - AI-powered docs platform
+  - litellm               # YC W23 - universal LLM gateway, 100+ models
+  - posthog               # YC W20 - product analytics + testing + experimentation
+
+  # --- VC portfolio discovery pass (2026-09-07) -----------------------------
+  - vanta                 # Sequoia - automated security/compliance monitoring
+  - openrouter            # Sequoia - unified API/router for LLMs
+  - anterior              # Sequoia - AI clinical-decision agents for prior auth
+  - rillet                # Sequoia - AI-native ERP/accounting platform
+  - airbyte               # Accel - open-source data integration/ELT
+  - checkly               # Accel - synthetic monitoring & API/E2E testing platform
+  - bettercloud           # Accel - SaaS operations management & automation
+  - exa                   # Lightspeed - AI-native search API for LLM/agent retrieval (RAG)
+  - cartesia              # Lightspeed - real-time voice AI models (TTS/STT)
+  - character             # Lightspeed - Character.AI, conversational AI platform
+  - clickhouse            # Lightspeed - high-performance OSS columnar analytics DB
+  - sarvam                # Peak XV - Indian-language generative AI, Bengaluru/Delhi
+  - temporal              # a16z - durable workflow-orchestration engine
+  - sesame                # a16z - Sesame AI, natural voice AI companion
+  - anyscale              # a16z - managed Ray platform, distributed AI/ML compute
+  - lovable               # Antler - AI app builder, Stockholm-based
+  - authzed               # General Catalyst - fine-grained authorization infra
+  - recall                # BVP - Recall.ai, API for meeting-bot data (Zoom/Meet/Teams)
+  - fal-ai                # BVP - fal, generative-media inference platform
+
+smartrecruiters:
+  - Visa
+  - Bosch
+  - Servicenow
+  - Swiggy
+  - Canva
+  - Uber
+  - Palantir
+  - Glean
+  # --- Hyderabad product companies + A-Z startups (probed live) -----------
+  - kredx                # KredX - 8 postings
+  - mobikon              # Mobikon - 2 postings
+  - nanoheal             # Nanoheal - 2 postings
+  - whatfix              # Whatfix - 1 postings
+  - valuelabs            # ValueLabs - 1 postings
+
+workable:
+  # --- YC startup discovery pass (2026-09-06, via yc-oss company directory) -
+  - testrigor            # YC S21 - executable English specs for test automation
+
+# Workday boards. The slug is tenant/wdN/site, taken straight off the careers
+# URL: https://browserstack.wd3.myworkdayjobs.com/External
+workday:
+  - browserstack/wd3/External   # BrowserStack - remote-only, testing company

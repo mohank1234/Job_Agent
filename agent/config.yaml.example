@@ -1,0 +1,391 @@
+# EXAMPLE / TEMPLATE — copy this to config.yaml and edit it. config.yaml is
+# gitignored (it carries your real mailbox address), so a fresh checkout has
+# no config.yaml at all until you create one from this file (repo audit
+# 2026-09-07 finding #11: without this, every command failed immediately
+# with "Missing config.yaml" on a clean clone).
+#
+#     cp config.yaml.example config.yaml
+#
+# Run configuration.
+#
+# YOUR CAREER PROFILE LIVES IN profile.yaml — target roles, skills, seniority,
+# locations and exclusions. This file only configures how the agent runs.
+#
+# The old `profile:` and `filters:` blocks are gone: they drove a keyword
+# prefilter that deleted jobs before storage. The pipeline now stores every
+# job and classifies it instead. See profile.yaml.
+
+profile_file: profile.yaml
+
+# Zero cost by default. Pay-per-use services (the Apify YC search and the
+# email verifier) run only when allow_paid_services is true. Exa web search
+# is held under exa_monthly_limit_usd, inside its free $10 monthly credit,
+# spread evenly over the days left in the month. The GitHub workflow also
+# forces these settings and never passes the paid services' keys to the run.
+billing:
+  allow_paid_services: false
+  exa_monthly_limit_usd: 8.0
+
+# Public employer-board scan and outreach drafts; never sends messages.
+morning:
+  workers: 6
+  max_report_rows: 1000
+  # No cap on companies researched or drafts: every fresh company is handled
+  # while the 06:00-14:00 IST window allows, stopping this many minutes
+  # before 14:00 so the report is always written.
+  report_reserve_minutes: 20
+  gmail_drafts: false  # Enable after Gmail compose consent for the expected account.
+  signature_phone: ""  # Optional phone placed on the line after your name in email drafts.
+  resume_attachment: ""  # Path to your PDF or DOCX resume; attached to each Gmail draft.
+  reviewed_contacts_file: ""  # Optional private JSON containing dated, sourced email contacts by company.
+  approval_required: true
+  discovery_queries:
+    - 'YC venture backed startup QA SDET 4 5 6 years India remote Hyderabad jobs'
+    - 'site:jobs.ashbyhq.com QA automation engineer India remote 4 6 years'
+    - 'site:jobs.lever.co OR site:job-boards.greenhouse.io SDET India remote startup 5 years'
+  # On top of the fixed searches above, each run builds new searches from
+  # profile.yaml (target roles, preferred cities, automation skills). They
+  # change every day, so the same questions are not asked twice in a row.
+  rotating_queries: 6          # daily job searches limited to Ashby/Lever/Greenhouse pages
+  growth_queries: 3            # daily funding / hiring-growth news searches
+  # board_lookup_searches: 5   # optional cap on web searches for careers boards the direct API check missed; unset = no cap
+  # A company researched on an earlier day waits this long before it is
+  # researched again, so new companies get the research budget first.
+  # Companies already contacted are left to the follow-up step.
+  research_cooldown_days: 14
+  # Startups of about 10-200 people are researched first, and for them the
+  # run looks for a verified founder / CTO / CEO email. Employee count comes
+  # from the search-indexed LinkedIn company page; leaders from YC hiring
+  # contacts, company research, and search-indexed LinkedIn profiles (LinkedIn
+  # is never fetched). An address is used only when the Apify actor
+  # clearpath/email-finder-api verifies the mailbox deliverable and safe to
+  # send on the company's own domain ($0.005/run + $0.008 per pattern
+  # tested, one person at a time, results kept for recheck_days).
+  # Free option: with a HUNTER_API_KEY (hunter.io free plan, no card) the
+  # verified email comes from Hunter's Email Finder instead, capped at
+  # hunter_monthly_limit searches and stopped by Hunter's own usage count;
+  # only addresses Hunter marks "valid" are used. Best companies go first.
+  founder_emails:
+    enabled: true
+    min_employees: 10
+    max_employees: 200
+    recheck_days: 30
+    # Email waterfall, one decision-maker per company (Founder > Co-founder >
+    # CEO > CTO > VP/Head of Engineering > Head of QA > Engineering Manager),
+    # stopping at the first address found:
+    #   1 COMPANY_WEBSITE  published on the company's own site (free, no guessing)
+    #   2 PROSPEO          PROSPEO_API_KEY; needs the person's name; charged only when found
+    #   3 HUNTER           HUNTER_API_KEY; Email Finder for a named person, else one Domain Search
+    #   4 TOMBA            TOMBA_API_KEY + TOMBA_SECRET; needs the name; every call counted
+    #   NO_VERIFIED_EMAIL  nothing verified; retried after recheck_empty_days
+    # Each provider has a monthly cap and an even daily share of what is left.
+    prospeo_monthly_limit: 100
+    hunter_monthly_limit: 50       # the free plan's monthly credits
+    tomba_monthly_limit: 25
+    recheck_empty_days: 7          # "no verified email found" is retried after this
+    # Optional: APOLLO_API_KEY (free plan, work-email account). People search
+    # is free; only the best-ranked leader is revealed, capped here.
+    apollo_monthly_limit: 10
+    max_charge_per_run_usd: 0.5
+  # Startup-first: hiring Y Combinator startups (public directory mirror,
+  # free) of min..max_employees people are checked each day for a relevant QA
+  # opening on their careers board or website. Openings join the day's jobs;
+  # startups without one get a short proactive enquiry, but only when a
+  # verified founder/CTO/CEO email exists. Contact order: up to 50 people
+  # Founder/Co-founder, CTO, CEO; larger: CTO, technical co-founder,
+  # Founder/CEO, then VP/Head of Engineering. One approach per company.
+  startups:
+    enabled: true
+    max_companies: 30              # startups checked per day, least recently checked first
+  # Y Combinator's "Work at a Startup" board (1,000+ live postings) has no
+  # public API of its own, unlike companies.yaml's board slugs. This calls a
+  # paid Apify actor (nomad-agent/ycombinator-was-scraper) instead - real
+  # money per run, capped server-side by max_total_charge_usd (Apify enforces
+  # this itself; nothing here tracks "remaining budget" locally). Requires
+  # APIFY_API_KEY. Verified 2026-09-20: $0.0025/job on the free account tier.
+  # Every matching posting is fetched (no item cap); the charge ceiling is set
+  # to cover the actor's full 1,000-item allowance ($2.50) and only stops a
+  # runaway run. A higher max_total_charge_usd here raises that ceiling.
+  apify_yc:
+    enabled: false
+    queries: ["QA", "SDET", "quality engineer", "software test engineer", "test automation"]
+    # These terms plus the profile's short target titles are all sent each
+    # run (the actor takes up to 20; a longer pool rotates daily). A query
+    # matches postings containing every one of its words, so keep terms
+    # short. The actor's repeat-delivery suppression is always turned off, so
+    # still-open postings keep appearing; the actor returns at most 200.
+
+llm:
+  # PROVIDER. Default is a local Ollama model: no API key, no quota, nothing
+  # leaves the machine. Install Ollama, then `ollama pull gpt-oss:20b`.
+  #
+  # MEASURED 2026-09-27, RTX 5060 Laptop (8 GB VRAM) + 16 GB RAM:
+  #   gpt-oss:20b  ~18 tok/s (59% CPU / 41% GPU), valid schema JSON on 6-job
+  #                batches, ~1-1.5 min per batch - fits the 06:00-14:00 window.
+  # A model that fits entirely in VRAM (e.g. qwen3:8b) is roughly 3x faster.
+  #
+  # Hosted alternatives (gemini, groq, openrouter, omnirate) remain available
+  # but are no longer the default; add them to free_providers to allow them.
+  provider: ollama
+  model: gpt-oss:20b
+  base_url: http://localhost:11434   # or set OLLAMA_HOST
+  think: low                # gpt-oss: low|medium|high; other models: true/false
+  num_ctx: 16384            # context window; 4 JDs + profile fit comfortably
+  keep_alive: 30m           # keep the model loaded between batches
+  # Research and news-extraction requests are trimmed to this many characters
+  # (source texts shortened evenly) so they fit the context window. About 3.5
+  # characters per token: 48000 suits num_ctx 16384. The GitHub run uses a
+  # small CPU model (qwen2.5:3b, num_ctx 8192) with 16000.
+  max_prompt_chars: 48000
+
+  # Tried in order if the primary errors. Models not installed are skipped.
+  fallback_models: []
+
+  batch_size: 4             # smaller batches keep local-model JSON reliable
+  max_tokens: 8000
+  timeout_seconds: 900      # local generation is slow; don't abandon it early
+  research_timeout_seconds: 600
+  retries: 2               # per batch, with exponential backoff
+  backoff_seconds: 4
+  max_jobs_per_run: 60
+
+  # How much the LLM verdict counts vs the deterministic role/skill score.
+  # Measured note: 28 of the 40 jobs ever shown were surfaced by the rules
+  # alone, so this layer is an enhancement, not the engine.
+  llm_weight: 0.75
+
+  # Cost guard: only providers on this list may be used.
+  free_models_only: true
+  free_providers: [ollama, omnirate]
+
+retention:
+  # RETENTION IS NON-DESTRUCTIVE BY DESIGN.
+  #
+  # The requirement for this project is that every fetched job stays in
+  # jobs.db: postings that do not fit are CLASSIFIED as D (low) or E (not
+  # relevant), never deleted. Freshness is a digest concern, not a storage
+  # concern — see `digest.max_age_days` below.
+  #
+  # `null` = store everything, drop nothing. Setting a number here makes the
+  # pipeline discard older postings BEFORE they are stored, which breaks that
+  # guarantee. Leave it null unless you deliberately want a lossy database.
+  max_age_days: null
+
+  # Postings with no published date are kept (several boards never publish
+  # one) and sort last in the digest, labelled "date unknown".
+  keep_undated: true
+
+  # Deleting non-matching jobs from jobs.db. OFF: category D/E rows are the
+  # record of what was considered and rejected, and they are what makes
+  # "why didn't it show me X?" answerable. Turning this on deletes them and
+  # leaves only a fingerprint tombstone.
+  prune_non_matching: false
+  prune_categories: [D, E]
+
+  # The raw source payload duplicates `description` and the parsed columns and
+  # nothing reads it. It was 53% of the database. Off = ~80% smaller rows.
+  store_raw: false
+
+matching:
+  # STRICT MODE. Only postings whose TITLE names a QA / testing / evaluation
+  # role become candidates. Developer roles ("Software Engineer, Generative
+  # AI", "Senior Software Engineer, Agents") are excluded even when their
+  # description is full of testing words. Set false to let SWE roles back in.
+  qa_roles_only: true
+
+digest:
+  # ONE JOB, ONE DIGEST. A job that appeared in an earlier day's file is never
+  # shown again, so each day's digest is only what you have not already seen.
+  # An empty digest is a valid result - it means nothing new turned up.
+  # Jobs reported earlier TODAY still appear, so the evening catch-up run does
+  # not erase what the morning run found.
+  only_new: false
+
+  # FRESHNESS WINDOW. Postings older than this are still stored and still
+  # classified, but they are not scored by the LLM and not shown. Fourteen days
+  # is a practical default for a backlog-heavy search; this keeps the digest
+  # useful when strong matches exist but are slightly older.
+  max_age_days: 14
+
+  # Ordering. The digest leads with freshness — these boundaries in days map to
+  # the "last 24 hours / 2 days / 4 days" sections. Fit orders within each.
+  freshness_tiers_days: [1, 2, 4]
+
+sources:
+  ats: true                # company boards from companies.yaml (highest signal)
+  remoteok: true
+  arbeitnow: true
+
+  remotive:
+    # NOTE: Remotive's public API ignores both `search` and `limit` — every
+    # query returns the same 16 postings (measured 2026-08-17). Targeted terms
+    # here would be 10 identical HTTP calls, so the list stays empty.
+    search_terms: []
+
+  jobicy:
+    # Global feed plus per-region, so one region cannot crowd out another.
+    geos: [usa, united-kingdom, india, canada, europe, asia, australia]
+
+  himalayas:               # worldwide remote board, includes salary data
+    max_jobs: 400
+
+  weworkremotely:
+    categories:
+      - remote-programming-jobs
+      - remote-devops-sysadmin-jobs
+      - remote-product-jobs
+
+  # Small curated board, ~40 postings, no pagination. Measured yield for this
+  # profile is near zero - mostly generic dev work locked to the EU or North
+  # America. One cheap request, so it stays; drop it if it stays at zero.
+  workingnomads: true
+
+  # Singapore's official government job board (Workforce Singapore). Public
+  # API, no key. The only SG source that reports salary, which is what decides
+  # Employment Pass eligibility - every posting is annotated with whether it
+  # clears MOM's floor. Keep ep_min_monthly_sgd in step with profile.yaml.
+  mycareersfuture:
+    ep_min_monthly_sgd: 5600
+    per_term: 30
+    fetch_descriptions: true
+    terms:
+      - QA engineer
+      - QA automation engineer
+      - SDET
+      - software test engineer
+      - test automation engineer
+      - quality assurance engineer
+      - performance test engineer
+      - AI quality engineer
+      - LLM evaluation engineer
+
+  mailbox:
+    # THE ONLY LEGITIMATE ROUTE TO NAUKRI / LINKEDIN / INDEED / INSTAHYRE.
+    # Those portals have no public API and prohibit scraping, but they will
+    # email you saved-search alerts. Reading your own inbox breaks no terms
+    # and cannot get an account banned.
+    #
+    #   1. Create daily job alerts on each portal (QA Engineer Hyderabad, etc.)
+    #   2. Create an APP PASSWORD for your mail account. Never the real one.
+    #      Gmail: Google Account -> Security -> 2-Step -> App passwords
+    #   3. setx JOBAGENT_MAIL_PASSWORD "the-app-password"   (restart the shell)
+    #   4. Set enabled: true and your address below
+    #   5. Check it before trusting it:  python run.py mailbox-test
+    #
+    # The mailbox is opened READ-ONLY: nothing is marked read, moved or deleted.
+    enabled: false                # flip to true once you've set the app password below
+    host: imap.gmail.com
+    port: 993
+    user: "your-address@gmail.com"
+    password_env: JOBAGENT_MAIL_PASSWORD
+    folder: INBOX                 # or a filtered folder, e.g. "JobAlerts"
+    max_age_days: 14
+    max_messages: 400
+
+  adzuna:
+    # Free key, 2 minutes, no card: https://developer.adzuna.com/
+    # Then copy Application ID + Application Key from
+    #   https://developer.adzuna.com/admin/access_details
+    #
+    # Adzuna is SEARCH-driven — there is no "everything" endpoint, so the
+    # terms below are the coverage. `where` narrows to a city, which is how
+    # Hyderabad onsite roles get found at all.
+    enabled: false
+    app_id: ""
+    app_key: ""
+
+    countries: [in, us, gb, ae, sg, ca, au]
+
+    search_terms:
+      - qa engineer
+      - qa automation engineer
+      - sdet
+      - software test engineer
+      - test automation engineer
+      - quality assurance engineer
+      - automation testing
+      - selenium tester
+      - api testing
+      - ai qa engineer
+
+    # Cities to search per country. India first: this is the Hyderabad route.
+    where:
+      in: ["Hyderabad", "Bengaluru", ""]
+      us: [""]
+      gb: [""]
+      ae: [""]
+      sg: [""]
+      ca: [""]
+      au: [""]
+
+    results_per_page: 50
+    pages: 2                  # 2 x 50 per term x city
+    max_days_old: 7
+
+# Company/contact discovery beyond the ATS boards and feeds above. Added
+# 2026-09-08 alongside jobagent/enrich/. Both keep to real free tiers
+# (checked that date) — see SETUP.md for signup links and current pricing.
+enrichment:
+  exa:
+    # Company/job/professional-profile discovery via neural search.
+    # https://exa.ai -> dashboard -> API key. Free tier: $20 signup credit +
+    # $10/month recurring, no card (checked 2026-09-08, exa.ai/pricing).
+    enabled: true
+    api_key_env: EXA_API_KEY
+
+  firecrawl:
+    # Extraction of public websites/job descriptions into clean markdown,
+    # including JS-rendered pages a plain HTTP GET can't read (e.g. YC
+    # company pages, which are blocked entirely in some sandboxed
+    # environments but reachable here).
+    # https://firecrawl.dev -> dashboard -> API key. Free tier: 1,000
+    # credits/month, no card (checked 2026-09-08).
+    enabled: true
+    api_key_env: FIRECRAWL_API_KEY
+
+  browserbase:
+    # Hosted browser sessions. OFF by default - nothing in this pipeline
+    # currently needs interactive browser automation (ATS/aggregator data
+    # comes from public JSON APIs; LinkedIn/Naukri are deliberately read via
+    # mailbox alerts, not a browser, to avoid unauthorized-scraping
+    # exposure - see jobagent/sources/mailbox.py). Turn on only if a
+    # concrete task actually needs it.
+    enabled: false
+    api_key_env: BROWSERBASE_API_KEY
+
+# Outbound email. Setup: Google Cloud Console -> enable Gmail API -> OAuth
+# 2.0 Client ID (Desktop app) -> download as credentials.json in the
+# project root. First run opens a browser for one-time consent.
+#
+# mode: draft_only (default) - every message lands as a Gmail draft you
+#   personally review and send. Zero risk of an unreviewed message reaching
+#   a real company.
+# mode: auto_send - once a message is composed and a verified public
+#   recipient email exists (draft_recipient's public+evidenced address
+#   rule), it is sent immediately with no human review step, and a single
+#   automatic follow-up (see jobagent/outreach/followup.py) goes out after
+#   followup_after_days if no reply was observed in that thread. A ledger
+#   (gmail_report_drafts.json) prevents any duplicate send or a second
+#   follow-up. Only ever set this if you explicitly want fully autonomous
+#   outreach to real companies with no review step - see
+#   jobagent/outreach/gmail.py for the exact safety rails this still keeps.
+outreach:
+  gmail:
+    enabled: true
+    credentials_path: credentials.json
+    token_path: token.json
+    mode: draft_only
+    followup_after_days: 5   # only used when mode is auto_send
+    sheet_id: ""             # fixed ID; never silently choose the newest same-name file
+    expected_sender: ""      # authenticated Gmail account must match
+
+# Vacancy report publishing is independent of the old cloud contact report.
+# A separate drive.file token grants access only to app-created/selected files.
+# Folder/report IDs are checkpointed in gitignored drive_output_state.json.
+drive_output:
+  expected_account: ""       # Google account in which output should be created
+  folder_name: "JobAgent Output"
+  main_files_only: true  # Google Sheet, Excel download, and resume; supporting evidence stays local.
+  discovery_queries:         # used only with explicit refresh-report --discover
+    - "QA Engineer SDET Playwright Selenium remote India hiring"
+    - "AI QA Engineer LLM evaluation SDET Hyderabad India hiring"

@@ -1,0 +1,10 @@
+{
+  "pause_on_captcha": true,
+  "pause_on_mfa": true,
+  "pause_on_restriction": true,
+  "pause_on_unknown_required_question": true,
+  "manual_confirmation_before_linkedin_send": true,
+  "linkedin_daily_page_limit": 0,
+  "linkedin_block_cooldown_hours": 72,
+  "linkedin_min_seconds_between_pages": 10
+}

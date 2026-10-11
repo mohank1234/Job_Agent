@@ -1,0 +1,8 @@
+{
+  "max_contacts_per_job": 3,
+  "max_contacts_per_company": 3,
+  "auto_send_connection_requests": false,
+  "auto_send_inmail": false,
+  "same_company_cooldown_days": 14,
+  "connection_note_limit": 300
+}
