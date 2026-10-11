@@ -114,6 +114,9 @@ jobs:
           set +e
           : > link-run.log
           step() { name="$1"; shift; "$@" >> link-run.log 2>&1; code=$?; echo "Job Link: $name exit $code"; return $code; }
+          DATA_REPO_TOKEN=$(printf '%s' "$DATA_REPO_TOKEN" | tr -d '[:space:]')
+          case "$DATA_REPO_TOKEN" in github_pat_*) kind="fine-grained";; ghp_*) kind="classic";; "") kind="EMPTY";; *) kind="unrecognised";; esac
+          echo "Job Link: DATA_REPO_TOKEN is ${kind}, ${#DATA_REPO_TOKEN} characters"
           git remote add data "https://x-access-token:${DATA_REPO_TOKEN}@github.com/${DATA_REPO}.git"
           mkdir -p vault
           # Only git's own error line is shown (token masked): it says whether the token is wrong, expired or lacks access to the data repository.
