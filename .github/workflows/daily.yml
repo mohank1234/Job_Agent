@@ -116,7 +116,9 @@ jobs:
           step() { name="$1"; shift; "$@" >> link-run.log 2>&1; code=$?; echo "Job Link: $name exit $code"; return $code; }
           git remote add data "https://x-access-token:${DATA_REPO_TOKEN}@github.com/${DATA_REPO}.git"
           mkdir -p vault
-          git fetch --depth=1 data main >> link-run.log 2>&1 && git show FETCH_HEAD:vault/private.enc > vault/private.enc 2>> link-run.log || { echo "Job Link: could not fetch the vault"; exit 1; }
+          # Only git's own error line is shown (token masked): it says whether the token is wrong, expired or lacks access to the data repository.
+          if ! git fetch --depth=1 data main >> link-run.log 2>&1; then echo "Job Link: could not reach the private data repository:"; tail -n 2 link-run.log | sed -E 's#https://[^@ ]*@#https://***@#g'; exit 1; fi
+          git show FETCH_HEAD:vault/private.enc > vault/private.enc 2>> link-run.log || { echo "Job Link: vault/private.enc is missing on the data repository's main branch"; exit 1; }
           step vault-open npx tsx src/cli.ts vault-open vault/private.enc || exit 1
           step state-pull npx tsx src/cli.ts state-pull --force
           step run npx tsx src/cli.ts run --headless
