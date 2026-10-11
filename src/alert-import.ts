@@ -18,6 +18,29 @@ const DETAIL = {
   applicationLinkSelector: 'a[aria-label*="Apply on company website" i]', easyApplySelector: '[aria-label*="Easy Apply" i]'
 };
 
+/** Title, company and location of a LinkedIn job page: the tab title reads "Title | Company | LinkedIn" and the line under the job title reads "Pune City, Maharashtra, India · 3 days ago · ...". */
+export function parseTopCard(docTitle: string, lines: string[]): { title?: string; company?: string; location?: string } {
+  const parts = docTitle.split(/\s+\|\s+/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 3 || !/^linkedin$/i.test(parts[parts.length - 1])) return {};
+  const title = parts.slice(0, -2).join(' | '); const company = parts[parts.length - 2];
+  const at = lines.findIndex((line) => line.trim() === title);
+  const detail = at >= 0 ? lines.slice(at + 1, at + 4).find((line) => line.includes(' · ')) : undefined;
+  const location = detail?.split(' · ')[0].trim();
+  return { title, company, ...(location && !/ago$/i.test(location) ? { location } : {}) };
+}
+
+/** Alerts that can still hold a fresh job: a job in an email was posted before the email arrived, so an email older than the window holds only stale ones. */
+export function freshAlerts(alerts: AlertJob[], maxAgeHours: number, now = Date.now()): AlertJob[] {
+  return alerts.filter((alert) => { const at = Date.parse(alert.receivedAt ?? ''); return !Number.isFinite(at) || now - at <= maxAgeHours * 3_600_000; });
+}
+
+/** True when two job titles share at least half of their words (so a closed-job or sign-in page's tab title is not mistaken for the posting). */
+export function similarTitles(a: string, b: string): boolean {
+  const words = (text: string): string[] => text.toLowerCase().split(/[^a-z0-9+#]+/).filter((word) => word.length > 1);
+  const left = words(a); const right = new Set(words(b));
+  return left.length > 0 && right.size > 0 && left.filter((word) => right.has(word)).length / Math.min(left.length, right.size) >= 0.5;
+}
+
 /** The alert file's postings that are real LinkedIn job links, one per LinkedIn job number, newest first. */
 export function parseAlertFile(text: string): AlertJob[] {
   const raw = JSON.parse(text) as unknown;
@@ -53,8 +76,15 @@ export async function loadAlertJobs(root: string, db: Database.Database, context
       await checkSourcePage(page, root, 'LinkedIn alert email', false);
       const base: Job = { title: alert.title, company: alert.company, location: alert.location ?? '', workMode: /remote/i.test(`${alert.location} ${alert.title}`) ? 'Remote' : '', jobUrl: alert.url, applicationUrl: alert.url, source: 'linkedin', externalId: id, postedAt: alert.receivedAt ?? '', description: '', metadata: { sourceName: 'LinkedIn alert email', alertReceivedAt: alert.receivedAt } };
       const hydrated = await hydrateJob(page, base, DETAIL);
-      // The email's own title and company are kept when the page cannot be read well enough to replace them.
-      if (hydrated.title && hydrated.company) jobs.push(normalizeJob({ ...hydrated, externalId: id }));
+      // The alert email's own company/title/location are unreliable ("linkedin", "Remote"); the page is the source of truth.
+      const card = parseTopCard(await page.title(), (await page.evaluate(() => document.body.innerText).catch(() => '')).split('\n').map((line) => line.trim()).filter(Boolean));
+      const trusted = !!card.title && similarTitles(card.title, alert.title);
+      if (!trusted) delete card.company, delete card.location;
+      if (card.title && trusted) hydrated.title = card.title;
+      if (card.company) hydrated.company = card.company;
+      if (card.location) { hydrated.location = card.location; hydrated.workMode = /remote/i.test(`${card.location} ${card.title ?? ''}`) ? 'Remote' : hydrated.workMode; }
+      // A page that does not read like the alerted job (closed, signed-out, layout change) is skipped rather than saved under the email's unreliable company.
+      if (trusted && hydrated.title && hydrated.company) jobs.push(normalizeJob({ ...hydrated, externalId: id }));
       else failed++;
     } catch { failed++; }
     finally { await page.close().catch(() => undefined); }

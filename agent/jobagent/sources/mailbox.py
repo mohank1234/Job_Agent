@@ -308,7 +308,8 @@ def test_connection(cfg: dict, timeout: float = 10.0) -> tuple[bool, str]:
     host = cfg.get("host", "imap.gmail.com")
     port = int(cfg.get("port", 993))
     user = cfg.get("user") or os.environ.get("JOBAGENT_MAIL_USER", "")
-    password = os.environ.get(cfg.get("password_env", "JOBAGENT_MAIL_PASSWORD"), "")
+    # Google shows an app password as four groups separated by spaces; the spaces are not part of it.
+    password = "".join(os.environ.get(cfg.get("password_env", "JOBAGENT_MAIL_PASSWORD"), "").split())
     if not user or not password:
         return False, "user or password env var not set"
     try:
@@ -337,7 +338,7 @@ def fetch_mailbox(cfg: dict) -> tuple[list[Job], list[str]]:
     host = cfg.get("host", "imap.gmail.com")
     port = int(cfg.get("port", 993))
     user = cfg.get("user") or os.environ.get("JOBAGENT_MAIL_USER", "")
-    password = os.environ.get(cfg.get("password_env", "JOBAGENT_MAIL_PASSWORD"), "")
+    password = "".join(os.environ.get(cfg.get("password_env", "JOBAGENT_MAIL_PASSWORD"), "").split())
     folder = cfg.get("folder", "INBOX")
     days = int(cfg.get("max_age_days", 7))
 

@@ -1,4 +1,4 @@
-import { loadAlertJobs, readAlertFile } from './alert-import.js';
+import { freshAlerts, loadAlertJobs, readAlertFile } from './alert-import.js';
 import { auditForPublication } from './audit-public.js';
 import { writeOutreachWorkbook } from './excel-export.js';
 import { writeDashboard } from './dashboard.js';
@@ -182,7 +182,7 @@ program.command('import-alerts <file>').description('Add the LinkedIn jobs from 
   const config=await loadConfig(root);await assertOnline();
   const release=await acquireRunLock(root);const db=openDatabase(root);let context:BrowserContext|undefined;let run:Awaited<ReturnType<typeof startRun>>|undefined;
   try{
-    const alerts=await readAlertFile(file);console.log(`[ALERTS] ${alerts.length} LinkedIn job(s) in the alert emails`);
+    const all=await readAlertFile(file);const alerts=freshAlerts(all,config.search.max_age_hours);console.log(`[ALERTS] ${all.length} LinkedIn job(s) in the alert emails, ${alerts.length} from emails inside the ${config.search.max_age_hours} h window`);
     run=await startRun(root,db,'live-discovery');const budget=new LinkedInBudget(db,config.safety);
     if(budget.status()==='BLOCKED')throw new Error(budget.describe());console.log(`[LINKEDIN] ${budget.describe()}`);
     context=await openPersistentSession(root,!!options.headless);
