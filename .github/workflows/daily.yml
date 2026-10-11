@@ -55,7 +55,10 @@ jobs:
     env:
       TZ: Asia/Kolkata
     steps:
+      # persist-credentials: false, or checkout's own token overrides DATA_REPO_TOKEN and the private data repository answers "not found".
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # ---------------------------------------------------------------- Job Link (once per IST day)
       - name: Job Link - decide whether to run today
