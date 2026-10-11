@@ -37,6 +37,18 @@ if ($LASTEXITCODE -ne 0) { Write-Warning 'The cloud state is newer, so local wor
 Write-Host "$(Get-Date -Format s) restoring the latest state"
 Invoke-Checked 'state-pull' { npx tsx src/cli.ts state-pull --force }
 
+# LinkedIn job-alert emails (your own inbox, read-only, app password): the freshly alerted jobs join the same queue before the normal run.
+$env:JOBAGENT_MAIL_PASSWORD = [Environment]::GetEnvironmentVariable('JOBAGENT_MAIL_PASSWORD', 'User')
+if ($env:JOBAGENT_MAIL_PASSWORD) {
+  Write-Host "$(Get-Date -Format s) reading LinkedIn job-alert emails"
+  Push-Location agent
+  python run.py mailbox-export --out ../data/alert-jobs.json
+  $mailCode = $LASTEXITCODE
+  Pop-Location
+  if ($mailCode -eq 0) { npx tsx src/cli.ts import-alerts data/alert-jobs.json --headless; if ($LASTEXITCODE -ne 0) { Write-Warning 'import-alerts failed; continuing with the normal run.' } }
+  else { Write-Warning 'Could not read the alert emails; continuing with the normal run.' }
+} else { Write-Host 'Job-alert emails skipped (JOBAGENT_MAIL_PASSWORD is not set).' }
+
 Write-Host "$(Get-Date -Format s) LinkedIn discovery, scoring and application preparation"
 Invoke-Checked 'run' { npx tsx src/cli.ts run --headless --limit $Limit --source 'LinkedIn configured QA search' }
 

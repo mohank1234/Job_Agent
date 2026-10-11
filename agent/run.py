@@ -984,6 +984,39 @@ def cmd_mailbox_test(args) -> None:
     return 1 if errors or passed != len(results) else 0
 
 
+def cmd_mailbox_export(args) -> int:
+    """Write the LinkedIn jobs found in the alert emails to a JSON file for Job Link (`npm run dev -- import-alerts <file>`).
+    Read-only on the mailbox; nothing is marked read, moved or deleted."""
+    import json
+    from pathlib import Path
+
+    config = load_yaml("config.yaml")
+    mail = dict((config.get("sources") or {}).get("mailbox") or {})
+    if not mail.get("enabled"):
+        console.print("[yellow]sources.mailbox.enabled is false.[/yellow]")
+        return 1
+    mail["senders"] = ["linkedin"]
+    mail["max_age_days"] = int(getattr(args, "days", 2) or 2)
+    jobs, errors = fetch_mailbox_jobs(mail)
+    for e in errors:
+        console.print(f"  [red]{e}[/red]")
+    rows = [
+        {"url": j.url, "title": j.title, "company": j.company, "location": j.location,
+         "receivedAt": j.posted_at.isoformat() if j.posted_at else None}
+        for j in jobs if j.source == "mail/linkedin"
+    ]
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+    console.print(f"{len(rows)} LinkedIn job(s) from alert emails -> {out}")
+    return 1 if errors and not rows else 0
+
+
+def fetch_mailbox_jobs(mail):
+    from jobagent.sources.mailbox import fetch_mailbox
+    return fetch_mailbox(mail)
+
+
 def cmd_classify_test(_args) -> None:
     """Role-classification self-test over representative titles."""
     from tests.role_cases import (CASES, GEO_CASES, run_cases, run_geo_cases,
@@ -1136,6 +1169,11 @@ def main() -> None:
     mt.add_argument("--offline", action="store_true",
                     help="parser self-test only; do not connect to the mailbox")
     mt.set_defaults(func=cmd_mailbox_test)
+
+    me = sub.add_parser("mailbox-export", help="write the LinkedIn jobs from your alert emails to a JSON file for Job Link")
+    me.add_argument("--out", default="../data/alert-jobs.json", help="output file")
+    me.add_argument("--days", type=int, default=2, help="only alerts from the last N days")
+    me.set_defaults(func=cmd_mailbox_export)
 
     sub.add_parser("check-setup", help="what is connected, what is missing"
                    ).set_defaults(func=cmd_check_setup)

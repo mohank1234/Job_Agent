@@ -1,3 +1,4 @@
+import { loadAlertJobs, readAlertFile } from './alert-import.js';
 import { auditForPublication } from './audit-public.js';
 import { writeOutreachWorkbook } from './excel-export.js';
 import { writeDashboard } from './dashboard.js';
@@ -177,6 +178,21 @@ program.command('find-contacts').description('Read-only LinkedIn search for hiri
 program.command('export-excel').description('Write reports/job-outreach.xlsx: jobs whose outreach is finished, jobs still waiting, and everyone written to').action(async()=>{const config=await loadConfig(root);const db=openDatabase(root);try{const sheet=await writeOutreachWorkbook(root,db,config.search.location_priority);console.log(`${sheet.completed} completed job(s), ${sheet.inProgress} in progress, ${sheet.people} people -> ${sheet.file}`);}finally{db.close();}});
 program.command('dashboard').description('Write reports/dashboard.html: one page for jobs, applications, outreach, runs and both GitHub automations').option('--open','open it in the browser').option('--offline','skip the GitHub run history').action(async(options:{open?:boolean;offline?:boolean})=>{const config=await loadConfig(root);const db=openDatabase(root);try{const file=await writeDashboard(root,db,config,!options.offline);console.log(`Dashboard: ${file}`);if(options.open)spawn('cmd',['/c','start','',file],{detached:true,stdio:'ignore'}).unref();}finally{db.close();}});
 program.command('audit-public').description('Before making the repository public: scan every file that would be published for your own details and for credentials (values are never printed)').action(async()=>{const result=await auditForPublication(root);console.log(`Checked ${result.checked} file(s).`);if(!result.findings.length){console.log('Nothing private found: safe to publish.');return;}for(const finding of result.findings)console.log(`  ${finding.file}: ${finding.kind}`);console.log(`${result.findings.length} problem(s). Do NOT publish until they are fixed.`);process.exitCode=1;});
+program.command('import-alerts <file>').description('Add the LinkedIn jobs from your alert emails (file from: python run.py mailbox-export): each is opened once, scored, and queued like any other job').option('--headless').option('--limit <number>').action(async(file:string,options:{headless?:boolean;limit?:string})=>{
+  const config=await loadConfig(root);await assertOnline();
+  const release=await acquireRunLock(root);const db=openDatabase(root);let context:BrowserContext|undefined;let run:Awaited<ReturnType<typeof startRun>>|undefined;
+  try{
+    const alerts=await readAlertFile(file);console.log(`[ALERTS] ${alerts.length} LinkedIn job(s) in the alert emails`);
+    run=await startRun(root,db,'live-discovery');const budget=new LinkedInBudget(db,config.safety);
+    if(budget.status()==='BLOCKED')throw new Error(budget.describe());console.log(`[LINKEDIN] ${budget.describe()}`);
+    context=await openPersistentSession(root,!!options.headless);
+    const loaded=await loadAlertJobs(root,db,context,alerts,budget,options.limit?Number(options.limit):40);
+    const imported=importJobs(db,loaded.jobs,config,run.runId,'live');
+    console.log(`[ALERTS] new=${loaded.jobs.length} already-known=${loaded.skippedKnown} unreadable=${loaded.failed}${loaded.stopped?' (LinkedIn page budget reached)':''} eligible=${imported.eligible}. Next: npm run dev -- run (it queues, fills and drafts notes for them).`);
+    await run.finish('COMPLETED',{alerts:alerts.length,...loaded,jobs:undefined,eligible:imported.eligible});
+  }catch(error){await run?.finish('FAILED',{error:error instanceof Error?error.message:String(error)}).catch(()=>undefined);throw error;}
+  finally{if(context)await closeSession(context).catch(()=>undefined);db.close();await release();}
+});
 program.command('draft-outreach').description('Re-write the connection notes that have not been sent yet, for the contacts already found (does not open LinkedIn)').action(async()=>{
   const config=await loadConfig(root);const release=await acquireRunLock(root);const db=openDatabase(root);
   try{

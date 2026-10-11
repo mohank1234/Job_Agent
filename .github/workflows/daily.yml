@@ -298,6 +298,7 @@ jobs:
           TOMBA_API_KEY: ${{ secrets.TOMBA_API_KEY }}
           TOMBA_SECRET: ${{ secrets.TOMBA_SECRET }}
           APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+          JOBAGENT_MAIL_PASSWORD: ${{ secrets.JOBAGENT_MAIL_PASSWORD }}
           FORCE_RUN: ${{ github.event.inputs.force_run }}
           PYTHONIOENCODING: utf-8
         run: |

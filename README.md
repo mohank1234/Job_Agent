@@ -84,6 +84,7 @@ Job Link (this folder) and Job Agent (`agent/`, Python) are one project with one
 - Job Link's console output goes to a file and is only pushed to the private `reports` branch; the public run log shows exit codes only; no artifacts, step summaries or issues are published;
 - `npm run dev -- audit-public` (also run by CI) fails if a file to be published contains your name, phone, email, links, employers or any token;
 - `./scripts/prepare-public.ps1` audits and builds the public copy next to the project and tells you the commands to publish it; `./scripts/open-dashboard.ps1` downloads the newest private state and opens the dashboard.
+- **LinkedIn job-alert emails.** With `JOBAGENT_MAIL_PASSWORD` (a Google app password for the inbox in `agent/config.yaml`) set as a user environment variable, `scripts/local-linkedin.ps1` first runs `python run.py mailbox-export` (read-only IMAP, LinkedIn senders, last 2 days) and `npm run dev -- import-alerts data/alert-jobs.json`: each alerted job is opened once (paced and counted by the LinkedIn page budget), scored, and queued like any other job, then the normal run fills forms, finds the hiring-team person and drafts notes.
 - Jobs the poster named under "Meet the hiring team" on LinkedIn are written to first (job poster, then the next hiring-team member), before people found by company search.
 
 ### Easy Apply
