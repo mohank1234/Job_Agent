@@ -28,3 +28,7 @@ state.enc
 logs/*.log
 config/contacts.json
 .claude/
+
+# Exported LinkedIn alert links carry email tracking tokens: never committed
+data/alert-jobs.json
+data/last-full-run.txt

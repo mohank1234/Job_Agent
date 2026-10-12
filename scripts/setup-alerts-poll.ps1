@@ -22,7 +22,7 @@ $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$command`""
 $trigger = New-ScheduledTaskTrigger -Daily -At '06:00'
 $repeat = New-ScheduledTaskTrigger -Once -At '06:00' -RepetitionInterval (New-TimeSpan -Minutes $Minutes) -RepetitionDuration (New-TimeSpan -Hours 17)
 $trigger.Repetition = $repeat.Repetition
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RunOnlyIfNetworkAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 40)
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RunOnlyIfNetworkAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -Description 'Job Link: read LinkedIn job-alert emails, queue the new jobs. Never sends or submits anything.' -Force | Out-Null
 Write-Host "Installed ${name}: every $Minutes minutes from 06:00 to 23:00. Output goes to $log"
 Write-Host 'Test it now with:  ./scripts/alerts-poll.ps1'
