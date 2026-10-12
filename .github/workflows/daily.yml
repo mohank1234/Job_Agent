@@ -130,7 +130,8 @@ jobs:
           step run npx tsx src/cli.ts run --headless
           RUN_CODE=$?
           if [ -n "$LINKEDIN_COOKIES_B64" ] && [ -z "$JOB_LINK_SKIP_LINKEDIN" ]; then step find-contacts npx tsx src/cli.ts find-contacts --headless --companies 5; fi
-          step state-push npx tsx src/cli.ts state-push
+          # The laptop (LinkedIn) is the only writer of the shared state: a cloud push here once made the cloud copy newer and the laptop's own database was replaced by it.
+          # The cloud run reads the latest published state and only publishes reports.
           step export-excel npx tsx src/cli.ts export-excel
           step dashboard npx tsx src/cli.ts dashboard --offline
           npx tsx src/cli.ts digest > agent/link-digest.md 2>> link-run.log || : > agent/link-digest.md
