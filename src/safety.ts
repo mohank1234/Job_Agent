@@ -15,11 +15,25 @@ export function detectSecurityText(text: string): string | undefined {
   return stopPatterns.find((pattern) => pattern.test(text))?.source;
 }
 
+/**
+ * Which text decides whether a page is a security stop. On LinkedIn a company page, profile or job post can legitimately SAY "identity
+ * verification" or "unusual activity" in its own content (a fraud-prevention company's page did, and stopped every people search), so
+ * there only dialogs, alerts, headings, or a short stand-alone page count; a checkpoint route always counts in full. Elsewhere the whole page counts.
+ */
+export function securityScope(url: string, bodyText: string, landmarkText: string): string {
+  let host = ''; let path = '';
+  try { const parsed = new URL(url); host = parsed.hostname; path = parsed.pathname; } catch { return bodyText; }
+  if (!/(^|\.)linkedin\.com$/i.test(host)) return bodyText;
+  if (/^\/(?:checkpoint|uas|authwall)(?:\/|$)/i.test(path)) return bodyText;
+  return bodyText.replace(/\s+/g, ' ').length < 2000 ? bodyText : landmarkText;
+}
+
 type FrameStop = { reason: string; status: 'BLOCKED_SECURITY' | 'LOGIN_REQUIRED' };
 
 async function inspectFrame(frame: Frame): Promise<FrameStop | undefined> {
   const body = await frame.locator('body').innerText().catch(() => '');
-  const text = detectSecurityText(body);
+  const landmarks = await frame.locator('[role="dialog"], [role="alertdialog"], [role="alert"], h1, h2, h3').allInnerTexts().then((parts) => parts.join(' | ')).catch(() => '');
+  const text = detectSecurityText(securityScope(frame.url(), body, landmarks));
   if (text) return { reason: text, status: 'BLOCKED_SECURITY' };
   const challenge = frame.locator('iframe[src*="recaptcha"][title*="challenge" i], iframe[src*="recaptcha"][title="reCAPTCHA"]:not([src*="size=invisible"]), iframe[src*="hcaptcha"], iframe[src*="challenges.cloudflare.com"], [data-sitekey]:not(.grecaptcha-badge):not([data-size="invisible"])');
   for (let index = 0; index < await challenge.count(); index++) {
