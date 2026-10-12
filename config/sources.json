@@ -28,7 +28,7 @@
     { "name": "Supabase careers", "type": "ashby", "board": "supabase", "company": "Supabase" },
     { "name": "Centific careers", "type": "workday", "company": "Centific", "url": "https://centific.wd1.myworkdayjobs.com/Centific_Global", "tenant": "centific", "site": "Centific_Global", "search_text": "QA", "max_pages": 20 },
     { "name": "State Street careers", "type": "workday", "company": "State Street", "url": "https://statestreet.wd1.myworkdayjobs.com/Global", "tenant": "statestreet", "site": "Global", "search_text": "QA", "max_pages": 20 },
-    { "name": "LinkedIn configured QA search", "type": "linkedin", "max_jobs": 500, "max_pages": 5, "max_searches": 90, "requires_login": false }
+    { "name": "LinkedIn configured QA search", "type": "linkedin", "max_jobs": 1000, "max_pages": 5, "max_searches": 90, "requires_login": false }
   ],
   "browser_sources": []
 }
