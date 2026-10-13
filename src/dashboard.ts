@@ -42,34 +42,40 @@ function jobAgentSnapshot(dir: string | undefined): Row | undefined {
   return snapshot;
 }
 
-export function collectDashboard(db: Database.Database, config: Config, integrations: Integrations = {}, now = Date.now(), online = true) {
+/** Midnight at the start of yesterday (local time): the dashboard shows nothing older unless asked (the database keeps everything). */
+export function startOfYesterday(now = Date.now()): string { const d = new Date(now); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - 1); return d.toISOString(); }
+
+export function collectDashboard(db: Database.Database, config: Config, integrations: Integrations = {}, now = Date.now(), online = true, since: string | null = startOfYesterday(now)) {
+  const after = (column: string): string => since ? ` AND ${column} >= '${since}'` : '';
   const priority = config.search.location_priority;
-  const jobs = db.prepare(`SELECT j.id, j.company, j.title, j.location, j.work_mode, j.posted_at, j.fit_score, j.status, j.job_url FROM jobs j WHERE j.evidence_mode='live'`).all() as Array<Row & { posted_at: string | null; location: string | null; work_mode: string | null; status: string }>;
+  const jobs = db.prepare(`SELECT j.id, j.company, j.title, j.location, j.work_mode, j.posted_at, j.fit_score, j.status, j.job_url FROM jobs j WHERE j.evidence_mode='live'${after('COALESCE(j.posted_at, j.detected_at)')}`).all() as Array<Row & { posted_at: string | null; location: string | null; work_mode: string | null; status: string }>;
   const actionable = jobs.filter((job) => ACTIONABLE.includes(job.status));
   // Work order grid: rows are age batches (freshest first), columns are locations in priority order.
   const columns = [...priority, 'Other'];
   const grid = AGE_BATCHES.map(() => columns.map(() => 0));
   for (const job of actionable) grid[ageBatchIndex(job.posted_at, now)][locationTier(job.location, job.work_mode, priority) - 1]++;
   const dayAgo = new Date(now - 86_400_000).toISOString();
-  const outreach = db.prepare('SELECT status, COUNT(*) n FROM outreach GROUP BY status').all() as Array<{ status: string; n: number }>;
+  // Notes still waiting for approval always count; everything else only from yesterday on.
+  const outreach = db.prepare(`SELECT status, COUNT(*) n FROM outreach WHERE status IN ('OUTREACH_READY','FAILED')${since ? ` OR COALESCE(sent_at, created_at) >= '${since}'` : ''} GROUP BY status`).all() as Array<{ status: string; n: number }>;
   const rows = (sql: string): Row[] => db.prepare(sql).all() as Row[];
   return {
     generatedAt: new Date(now).toISOString(), priority, columns, batches: [...AGE_BATCHES], grid,
     kpis: {
       liveJobsSeen: jobs.length, newLast24h: count(db, "SELECT COUNT(*) n FROM jobs WHERE evidence_mode='live' AND detected_at>=?", dayAgo), actionable: actionable.length,
-      readyToSubmit: count(db, "SELECT COUNT(*) n FROM applications WHERE status='READY_FOR_SUBMISSION'"), needsInput: count(db, "SELECT COUNT(*) n FROM applications WHERE status='NEEDS_USER_INPUT'"),
-      submitted: count(db, "SELECT COUNT(*) n FROM applications WHERE status='SUBMITTED'"), invitationsSent: outreach.find((row) => row.status === 'SENT')?.n ?? 0,
-      invitationsWaiting: outreach.filter((row) => ['OUTREACH_READY', 'FAILED'].includes(row.status)).reduce((sum, row) => sum + row.n, 0), people: count(db, 'SELECT COUNT(*) n FROM contacts')
+      readyToSubmit: count(db, `SELECT COUNT(*) n FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.status='READY_FOR_SUBMISSION'${after('COALESCE(j.posted_at, j.detected_at)')}`), needsInput: count(db, `SELECT COUNT(*) n FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.status='NEEDS_USER_INPUT'${after('COALESCE(j.posted_at, j.detected_at)')}`),
+      submitted: count(db, `SELECT COUNT(*) n FROM applications WHERE status='SUBMITTED'${since ? ` AND submitted_at >= '${since}'` : ''}`), invitationsSent: outreach.find((row) => row.status === 'SENT')?.n ?? 0,
+      invitationsWaiting: outreach.filter((row) => ['OUTREACH_READY', 'FAILED'].includes(row.status)).reduce((sum, row) => sum + row.n, 0), people: count(db, `SELECT COUNT(DISTINCT contact_id) n FROM outreach WHERE 1=1${after('COALESCE(sent_at, created_at)')}`)
     },
-    jobStatus: rows("SELECT status, COUNT(*) n FROM jobs WHERE evidence_mode='live' AND status!='SKIPPED' GROUP BY status ORDER BY n DESC"),
-    skipped: count(db, "SELECT COUNT(*) n FROM jobs WHERE evidence_mode='live' AND status='SKIPPED'"),
+    jobStatus: rows(`SELECT status, COUNT(*) n FROM jobs WHERE evidence_mode='live' AND status!='SKIPPED'${after('COALESCE(posted_at, detected_at)')} GROUP BY status ORDER BY n DESC`),
+    skipped: count(db, `SELECT COUNT(*) n FROM jobs WHERE evidence_mode='live' AND status='SKIPPED'${after('COALESCE(posted_at, detected_at)')}`),
     outreach: outreach as unknown as Row[],
-    ready: rows(`SELECT j.id, j.company, j.title, j.location, j.fit_score, j.job_url, a.resume FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.status='READY_FOR_SUBMISSION' AND j.evidence_mode='live' ORDER BY j.fit_score DESC LIMIT 15`),
-    needsYou: rows(`SELECT j.id, j.company, j.title, j.location, j.fit_score, j.job_url, substr(COALESCE(a.last_error,''),1,140) reason FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.status='NEEDS_USER_INPUT' AND j.evidence_mode='live' AND j.status NOT IN ('SUBMITTED','CLOSED_JOB','ALREADY_APPLIED') ORDER BY j.fit_score DESC LIMIT 15`),
-    recentOutreach: rows(`SELECT j.company, j.title, c.name, c.title contact_title, o.status, o.sent_at, o.character_count, o.message FROM outreach o JOIN jobs j ON j.id=o.job_id JOIN contacts c ON c.id=o.contact_id ORDER BY COALESCE(o.sent_at, o.created_at) DESC LIMIT 12`),
-    runs: rows('SELECT substr(id,1,8) id, mode, status, started_at, finished_at FROM runs ORDER BY started_at DESC LIMIT 12'),
+    ready: rows(`SELECT j.id, j.company, j.title, j.location, j.fit_score, j.job_url, a.resume FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.status='READY_FOR_SUBMISSION' AND j.evidence_mode='live'${after('COALESCE(j.posted_at, j.detected_at)')} ORDER BY j.fit_score DESC LIMIT 15`),
+    needsYou: rows(`SELECT j.id, j.company, j.title, j.location, j.fit_score, j.job_url, substr(COALESCE(a.last_error,''),1,140) reason FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.status='NEEDS_USER_INPUT' AND j.evidence_mode='live' AND j.status NOT IN ('SUBMITTED','CLOSED_JOB','ALREADY_APPLIED')${after('COALESCE(j.posted_at, j.detected_at)')} ORDER BY j.fit_score DESC LIMIT 15`),
+    recentOutreach: rows(`SELECT j.company, j.title, c.name, c.title contact_title, o.status, o.sent_at, o.character_count, o.message FROM outreach o JOIN jobs j ON j.id=o.job_id JOIN contacts c ON c.id=o.contact_id WHERE 1=1${after('COALESCE(o.sent_at, o.created_at)')} ORDER BY COALESCE(o.sent_at, o.created_at) DESC LIMIT 12`),
+    runs: rows(`SELECT substr(id,1,8) id, mode, status, started_at, finished_at FROM runs WHERE 1=1${after('started_at')} ORDER BY started_at DESC LIMIT 12`),
     sources: rows("SELECT name, status, discovered, substr(COALESCE(error,''),1,120) error FROM run_sources WHERE run_id=(SELECT run_id FROM run_sources ORDER BY id DESC LIMIT 1) AND status!='SUCCESS'"),
-    errors: rows('SELECT stage, substr(error,1,160) error, timestamp FROM errors ORDER BY id DESC LIMIT 6'),
+    errors: rows(`SELECT stage, substr(error,1,160) error, timestamp FROM errors WHERE 1=1${after('timestamp')} ORDER BY id DESC LIMIT 6`),
+    since,
     linkedin: new LinkedInBudget(db, config.safety).describe(),
     automation: online ? { link: githubRuns(integrations.link_repo), jobAgent: githubRuns(integrations.job_agent_repo) } : { link: [] as Row[], jobAgent: [] as Row[] },
     jobAgent: jobAgentSnapshot(integrations.job_agent_dir)
@@ -107,7 +113,7 @@ export function renderDashboard(data: DashboardData): string {
   const agent = data.jobAgent;
   const agentCard = agent ? `<section class="card"><h2>Job Agent snapshot on this machine${agent.lastSeen ? ` (last posting stored ${esc(ago(agent.lastSeen, now))}; the cloud run is the live one)` : ''}</h2><p class="muted">${esc(agent.postingsSeen)} postings stored · Gmail drafts written: ${esc(agent.emailDrafts ?? 0)} · grades: ${((agent.byGrade as Row[] | undefined) ?? []).map((g) => `${esc(g.grade)}=${esc(g.n)}`).join(', ')}</p>${table(['Company', 'Title', 'Location', 'Grade'], ((agent.best as Row[]) ?? []).map((r) => [esc(r.company), link(r.title, r.url), esc(r.location), esc(r.grade)]), 'No A/B matches stored.')}</section>` : '';
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Job Hub Dashboard</title><style>${CSS}</style></head><body><main>
-<h1>Job Hub</h1><p class="sub">Updated ${esc(data.generatedAt.replace('T', ' ').slice(0, 16))} UTC · LinkedIn: ${esc(data.linkedin)} · Work order: freshest age batch first, then ${esc(data.priority.join(' → '))} → other</p>
+<h1>Job Hub</h1><p class="sub">${data.since ? `Showing jobs and activity since yesterday (${esc(data.since.slice(0, 10))}); older data is kept in the database, show it with: dashboard --all` : 'Showing everything'} · Updated ${esc(data.generatedAt.replace('T', ' ').slice(0, 16))} UTC · LinkedIn: ${esc(data.linkedin)} · Work order: freshest age batch first, then ${esc(data.priority.join(' → '))} → other</p>
 <div class="tiles">${tile('Live jobs seen', k.liveJobsSeen)}${tile('New in 24 h', k.newLast24h)}${tile('Open to act on', k.actionable)}${tile('Ready to submit', k.readyToSubmit, 'you confirm')}${tile('Needs your input', k.needsInput)}${tile('Submitted', k.submitted)}${tile('Invitations sent', k.invitationsSent)}${tile('Notes waiting', k.invitationsWaiting, 'you approve')}${tile('People contacted', k.people)}</div>
 <div class="cols"><section class="card"><h2>Open jobs by age and location</h2>${grid}</section>
 <section class="card"><h2>Where every live job stands</h2>${bars(data.jobStatus)}<p class="muted">${data.skipped} more were filtered out (wrong role, internship, under 4 years, duplicate, too old).</p><h2 class="sm">Outreach</h2>${bars(data.outreach) || '<p class="muted">Nothing yet.</p>'}</section></div>
@@ -120,11 +126,11 @@ ${agentCard}
 </main></body></html>`;
 }
 
-export async function writeDashboard(root: string, db: Database.Database, config: Config, online = true): Promise<string> {
+export async function writeDashboard(root: string, db: Database.Database, config: Config, online = true, all = false): Promise<string> {
   let integrations: Integrations = {};
   try { integrations = JSON.parse(readFileSync(join(root, 'config', 'integrations.json'), 'utf8')) as Integrations; } catch { /* optional */ }
   const file = join(root, 'reports', 'dashboard.html');
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, renderDashboard(collectDashboard(db, config, integrations, Date.now(), online)), 'utf8');
+  await writeFile(file, renderDashboard(collectDashboard(db, config, integrations, Date.now(), online, all ? null : startOfYesterday())), 'utf8');
   return file;
 }
