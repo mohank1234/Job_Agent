@@ -54,12 +54,21 @@ program.command('login').description('Legitimate manual login using the persiste
   try{const urls=options.url?[options.url]:(JSON.parse(await readFile(`${root}/config/sites.json`,'utf8')) as {login_urls:string[]}).login_urls;for(const url of urls)if(!/^https?:\/\//.test(url))throw new Error('Login URL must use HTTP(S)');context=await openPersistentSession(root,false);await waitForManualLogin(context,urls);const config=await loadConfig(root);const db=openDatabase(root);try{new LinkedInBudget(db,config.safety).clearBlock();}finally{db.close();}}finally{if(context)await closeSession(context);await release();}
 });
 
-type RunOptions={login?:boolean;headless?:boolean;limit?:string;source?:string;discover?:boolean};
+type RunOptions={login?:boolean;headless?:boolean;limit?:string;source?:string;discover?:boolean;recent?:string};
 async function executeRun(options:RunOptions,discoveryOnly=false):Promise<void>{
   const config=await loadConfig(root);const settings=await loadSourceSettings(root);
   if(options.headless)config.application.headless=true;
   if(options.limit){const limit=Number(options.limit);if(!Number.isInteger(limit)||limit<1||limit>10000)throw new Error('--limit must be 1..10000');config.application.max_jobs_per_run=limit;}
   if(options.source){const names=options.source.split(',');const known=[...settings.sources,...settings.browser_sources].map(s=>s.name);for(const name of names)if(!known.includes(name))throw new Error(`Unknown source ${name}`);settings.sources=settings.sources.filter(s=>names.includes(s.name));settings.browser_sources=settings.browser_sources.filter(s=>names.includes(s.name));}
+  // --recent <hours>: a small LinkedIn search for jobs posted in the last few hours only (the 30-minute check). It uses the person's role names, locations
+  // (remote, hybrid and on-site alike) and experience rules, but is capped to a handful of search pages so LinkedIn sees very little traffic.
+  if(options.recent){
+    const hours=Number(options.recent);if(!(hours>0&&hours<=24))throw new Error('--recent must be 1..24 hours');
+    config.search.max_age_hours=hours;config.search.priority_window_hours=Math.min(config.search.priority_window_hours,hours);
+    const search=settings.sources.find(s=>s.type==='linkedin');if(!search)throw new Error('No LinkedIn source is configured');
+    Object.assign(search,{enabled:true,max_jobs:60,max_pages:1,max_searches:16,roles:['QA Engineer','SDET','Test Automation Engineer','Quality Engineer']});
+    settings.sources=[search];settings.browser_sources=[];
+  }
   // Unattended environments without a LinkedIn session must not open LinkedIn at all.
   if(process.env.JOB_LINK_SKIP_LINKEDIN==='1'||(process.env.CI&&!process.env.LINKEDIN_COOKIES_B64)){const before=settings.sources.length;settings.sources=settings.sources.filter(s=>s.type!=='linkedin');if(settings.sources.length<before)console.log('[LINKEDIN] skipped: disabled or no session cookie configured for this environment');}
   await assertOnline();
@@ -93,7 +102,7 @@ async function executeRun(options:RunOptions,discoveryOnly=false):Promise<void>{
   }catch(error){if(run){db.prepare('INSERT INTO errors(run_id,stage,error,timestamp) VALUES(?,?,?,?)').run(run.runId,'RUN',String(error),new Date().toISOString());await run.finish('FAILED',metrics);console.log(`Failure report: ${await writeRunReport(root,db,run.runId)}`);}throw error;}
   finally{if(context)await closeSession(context).catch(()=>undefined);db.close();await release();}
 }
-program.command('run').description('Discover, evaluate, queue and process a real multi-job batch').option('--login').option('--headless').option('--limit <number>').option('--source <names>','comma-separated configured source names').option('--no-discover','resume durable applications without querying sources').action(options=>executeRun(options));
+program.command('run').description('Discover, evaluate, queue and process a real multi-job batch').option('--login').option('--headless').option('--limit <number>').option('--source <names>','comma-separated configured source names').option('--recent <hours>','search LinkedIn only for jobs posted in the last few hours (small, capped search)').option('--no-discover','resume durable applications without querying sources').action(options=>executeRun(options));
 program.command('discover').description('Query configured live sources, normalize, persist and score').option('--login').option('--headless').option('--source <names>').action(options=>executeRun(options,true));
 program.command('questions').description('List unanswered factual questions and user-action blockers').action(()=>{const db=openDatabase(root);try{console.table(db.prepare("SELECT q.id,q.job_id,j.company,j.title,q.question,q.category,q.page_url FROM questions q JOIN jobs j ON j.id=q.job_id WHERE q.status='OPEN'").all());}finally{db.close();}});
 program.command('answer <questionId> <value>').description('Save a verified answer; reuse unambiguous factual answers globally').option('--reuse','also store this exact question in application.json').action(async(questionId:string,value:string,options:{reuse?:boolean})=>{

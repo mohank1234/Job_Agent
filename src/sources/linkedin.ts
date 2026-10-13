@@ -15,11 +15,11 @@ export function linkedinJobKey(url: string): string {
   try { const parsed = new URL(url); return parsed.origin + parsed.pathname; } catch { return url; }
 }
 
-export function linkedinSearchUrls(config: Config, maxSearches = 6): string[] {
+export function linkedinSearchUrls(config: Config, maxSearches = 6, roles: string[] = []): string[] {
   const locations = config.search.locations.length ? config.search.locations : config.candidate.preferred_locations;
   const urls: string[] = [];
   // Location-major: if a run's search budget ends early, the priority locations (Hyderabad, Remote, Bangalore) have already been searched.
-  for (const location of locations.length ? locations : [config.candidate.location]) for (const role of config.search.role_keywords) {
+  for (const location of locations.length ? locations : [config.candidate.location]) for (const role of roles.length ? roles : config.search.role_keywords) {
     const url = new URL('https://www.linkedin.com/jobs/search/');
     url.searchParams.set('keywords', role); url.searchParams.set('location', /^remote$/i.test(location) ? config.candidate.location.split(',').at(-1)!.trim() : location);
     if (/^remote$/i.test(location)) url.searchParams.set('f_WT', '2');
@@ -37,7 +37,7 @@ export class LinkedInJobSource implements JobSource {
   truncated = false;
   constructor(private readonly context: BrowserContext, private readonly settings: Extract<SourceConfig, { type: 'linkedin' }>, private readonly root: string, private readonly guard?: PageGuard) { this.name = settings.name; }
   async discover(config: Config): Promise<Job[]> {
-    const urls = this.settings.urls.length ? this.settings.urls : linkedinSearchUrls(config, this.settings.max_searches);
+    const urls = this.settings.urls.length ? this.settings.urls : linkedinSearchUrls(config, this.settings.max_searches, this.settings.roles);
     const potentialSearches = config.search.role_keywords.length * Math.max(1, (config.search.locations.length ? config.search.locations : config.candidate.preferred_locations).length);
     if (!this.settings.urls.length && potentialSearches > urls.length) this.warnings.push(`Search limit: ${urls.length} of ${potentialSearches} role/location combinations requested; increase max_searches to cover all`);
     // One posting commonly matches several keyword searches; fetching it once keeps the page count (and LinkedIn footprint) down.

@@ -21,7 +21,7 @@ export const sourceSchema = z.discriminatedUnion('type', [
   z.object({ ...board, type: z.literal('lever'), region: z.enum(['global', 'eu']).default('global') }).strict(),
   z.object({ ...board, type: z.literal('ashby'), board: z.string().min(1).max(200).regex(/^[\p{L}\p{N} ._-]+$/u) }).strict(),
   z.object({ ...base, type: z.literal('workday'), company: z.string().min(1), url: httpUrl, tenant: z.string().regex(/^[\w-]+$/), site: z.string().regex(/^[\w-]+$/), search_text: z.string().default(''), max_pages: z.number().int().positive().max(200).default(50) }).strict(),
-  z.object({ ...base, type: z.literal('linkedin'), urls: z.array(httpUrl).default([]), max_pages: z.number().int().positive().max(40).default(5), max_searches: z.number().int().positive().max(100).default(6), requires_login: z.boolean().default(false) }).strict(),
+  z.object({ ...base, type: z.literal('linkedin'), urls: z.array(httpUrl).default([]), max_pages: z.number().int().positive().max(40).default(5), max_searches: z.number().int().positive().max(100).default(6), requires_login: z.boolean().default(false), roles: z.array(z.string().min(1)).default([]) }).strict(),
   browserSourceSchema
 ]);
 export const sourceSettingsSchema = z.object({
