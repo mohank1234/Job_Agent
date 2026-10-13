@@ -43,6 +43,7 @@ export function openDatabase(root: string): Database.Database {
       CREATE TABLE IF NOT EXISTS linkedin_actions (id INTEGER PRIMARY KEY, day TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS linkedin_actions_day_idx ON linkedin_actions(day);
       CREATE TABLE IF NOT EXISTS linkedin_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS inbox_plan (job_id INTEGER PRIMARY KEY REFERENCES jobs(id), decision TEXT NOT NULL, decided_at TEXT NOT NULL, done_at TEXT, result TEXT);
       PRAGMA user_version = 2;
     `);
     // Historical fixture records must never enter the live application queue.

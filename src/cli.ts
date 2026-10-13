@@ -203,7 +203,7 @@ program.command('import-alerts <file>').description('Add the LinkedIn jobs from 
   }catch(error){await run?.finish('FAILED',{error:error instanceof Error?error.message:String(error)}).catch(()=>undefined);throw error;}
   finally{if(context)await closeSession(context).catch(()=>undefined);db.close();await release();}
 });
-program.command('inbox').description('Everything waiting on you, one item at a time and without job numbers: submit ready applications, finish manual ones, answer questions').option('--only <part>','ready, manual or questions').action(async(options:{only?:string})=>{const config=await loadConfig(root);const db=openDatabase(root);try{await runInbox(root,db,config,options.only);}finally{db.close();}});
+program.command('inbox').description('Everything waiting on you in one numbered table: pick what to submit, answer the questions, then it fills and submits for you; answers are saved for next time').option('--only <part>','ready, manual or questions').option('--all','include postings older than 3 days').action(async(options:{only?:string;all?:boolean})=>{const config=await loadConfig(root);const db=openDatabase(root);try{await runInbox(root,db,config,{only:options.only,all:options.all});}finally{db.close();}});
 program.command('draft-outreach').description('Re-write the connection notes that have not been sent yet, for the contacts already found (does not open LinkedIn)').action(async()=>{
   const config=await loadConfig(root);const release=await acquireRunLock(root);const db=openDatabase(root);
   try{
