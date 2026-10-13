@@ -206,24 +206,33 @@ async function execute(root: string, db: Database.Database, rl: ReturnType<typeo
     finishPlan(db, step.jobId, code ? 'failed to record' : 'recorded as applied'); results.push({ ...label(step.jobId), did: 'applied by you', result: code ? 'could not record' : 'recorded' });
   }
   const answered = plan.filter((p) => p.decision === 'ANSWERED');
-  if (answered.length) {
-    for (const step of answered) { transitionApplication(db, step.jobId, 'READY_FOR_REVIEW', 'USER_REVIEW'); db.prepare('UPDATE applications SET attempt_count=0 WHERE job_id=?').run(step.jobId); }
-    console.log(`\nFilling ${answered.length} application(s) again with your answers (nothing is submitted by this step)...`);
-    cli(['run', '--headless', '--no-discover', '--limit', String(answered.length + 5)]);
+  // An explicit review (by job) ignores the freshness window that the automatic run applies, so a job you chose to answer is not dropped as "expired".
+  // With auto-submit it fills the form again and submits in one go, only if every check passes; without it, it only fills.
+  for (const [index, step] of answered.entries()) {
+    const info = label(step.jobId);
+    transitionApplication(db, step.jobId, 'READY_FOR_REVIEW', 'USER_REVIEW'); db.prepare('UPDATE applications SET attempt_count=0 WHERE job_id=?').run(step.jobId);
+    console.log(`\n[${index + 1}/${answered.length}] ${autoSubmit ? 'Filling and submitting' : 'Filling'} ${info.company} — ${info.title}`);
+    cli(['review', String(step.jobId), ...(autoSubmit ? ['--submit'] : []), '--headless']);
+    const after = status(db, step.jobId);
+    finishPlan(db, step.jobId, after.status);
+    results.push({ ...info, did: autoSubmit ? 'filled + submit' : 'filled again', result: `${after.status}${after.status !== 'SUBMITTED' && after.status !== 'READY_FOR_SUBMISSION' && after.last_error ? ` — ${String(after.last_error).slice(0, 150)}` : ''}` });
   }
-  const toSubmit = [...plan.filter((p) => p.decision === 'SUBMIT').map((p) => p.jobId), ...(autoSubmit ? answered.map((p) => p.jobId) : [])];
+  const toSubmit = plan.filter((p) => p.decision === 'SUBMIT').map((p) => p.jobId);
   for (const [index, jobId] of toSubmit.entries()) {
     const info = label(jobId); const now = status(db, jobId);
-    if (now.status !== 'READY_FOR_SUBMISSION') { results.push({ ...info, did: 'submit', result: `not ready: ${now.status}${now.last_error ? ` — ${String(now.last_error).slice(0, 60)}` : ''}` }); finishPlan(db, jobId, `not ready: ${now.status}`); continue; }
+    if (now.status !== 'READY_FOR_SUBMISSION') { results.push({ ...info, did: 'submit', result: `not ready: ${now.status}${now.last_error ? ` — ${String(now.last_error).slice(0, 150)}` : ''}` }); finishPlan(db, jobId, `not ready: ${now.status}`); continue; }
     console.log(`\n[${index + 1}/${toSubmit.length}] Submitting ${info.company} — ${info.title}`);
     cli(['review', String(jobId), '--submit', '--headless']);
     const after = status(db, jobId);
     finishPlan(db, jobId, after.status);
-    results.push({ ...info, did: 'submit', result: `${after.status}${after.status !== 'SUBMITTED' && after.last_error ? ` — ${String(after.last_error).slice(0, 60)}` : ''}` });
+    results.push({ ...info, did: 'submit', result: `${after.status}${after.status !== 'SUBMITTED' && after.last_error ? ` — ${String(after.last_error).slice(0, 150)}` : ''}` });
   }
-  for (const step of answered.filter((p) => !toSubmit.includes(p.jobId))) { const after = status(db, step.jobId); finishPlan(db, step.jobId, after.status); results.push({ ...label(step.jobId), did: 'filled again', result: after.status }); }
   console.log(`\n${line('═')}\n  RESULT\n${line('═')}`);
-  console.log(`${clip('DID', 15)}${clip('COMPANY — ROLE', 56)}RESULT`);
-  for (const row of results) console.log(`${clip(row.did, 15)}${clip(`${row.company} — ${row.title}`, 56)}${row.result}`);
+  console.log(`${clip('DID', 17)}${clip('COMPANY — ROLE', 56)}RESULT`);
+  for (const row of results) {
+    const [head, ...more] = row.result.split(' — ');
+    console.log(`${clip(row.did, 17)}${clip(`${row.company} — ${row.title}`, 56)}${head}`);
+    if (more.length) console.log(`${' '.repeat(17)}↳ ${more.join(' — ')}`);
+  }
   console.log(`\nAnything still waiting shows up the next time you run:  npm run dev -- inbox`);
 }
