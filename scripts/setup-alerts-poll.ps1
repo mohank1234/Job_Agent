@@ -16,8 +16,9 @@ $script = Join-Path $PSScriptRoot 'alerts-poll.ps1'
 $log = Join-Path $project 'logs\alerts-poll.log'
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
 
-$command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$script`" >> `"$log`" 2>&1"
-$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$command`"" -WorkingDirectory $project
+$launcher = Join-Path $PSScriptRoot 'run-hidden.vbs'
+# wscript runs the script with no window at all (a plain cmd.exe action opens a visible console every time).
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$launcher`" `"$script`" `"$log`"" -WorkingDirectory $project
 # A daily trigger that repeats every N minutes for 17 hours (the script itself also skips quiet hours).
 $trigger = New-ScheduledTaskTrigger -Daily -At '06:00'
 $repeat = New-ScheduledTaskTrigger -Once -At '06:00' -RepetitionInterval (New-TimeSpan -Minutes $Minutes) -RepetitionDuration (New-TimeSpan -Hours 17)

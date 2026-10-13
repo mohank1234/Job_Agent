@@ -17,8 +17,9 @@ $script = Join-Path $PSScriptRoot 'local-linkedin.ps1'
 $log = Join-Path $project 'logs\local-linkedin.log'
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
 
-$command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$script`" >> `"$log`" 2>&1"
-$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$command`"" -WorkingDirectory $project
+$launcher = Join-Path $PSScriptRoot 'run-hidden.vbs'
+# wscript runs the script with no window at all (a plain cmd.exe action opens a visible console every time).
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$launcher`" `"$script`" `"$log`"" -WorkingDirectory $project
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
 # Run on battery, wait for a network connection (a task fired right after waking would otherwise fail), and catch up if the laptop was off.
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RunOnlyIfNetworkAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
