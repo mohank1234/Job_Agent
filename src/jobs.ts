@@ -101,7 +101,11 @@ export function persistJob(db: Database.Database, input: JobInput, config: Confi
       AND status!='CLOSED_JOB' AND (external_id IS NULL OR ? IS NULL) AND ABS(julianday(COALESCE(posted_at,detected_at))-julianday(?))<=7 LIMIT 1`).get(key,mode,job.externalId??null,job.postedAt||job.discoveredAt) as typeof existing;
     if (existing) { job = mergeWithStored(db, job, existing.id); identities = jobIdentities(job); key = identityKey(job); }
     const bucket = ageBucket(job.postedAt,config,now);
-    const filter = matchesSearch(job,config);
+    // A job LinkedIn itself sent to the person (alert email) is treated as eligible: its role/location/skill match was LinkedIn's call and the person's own saved searches.
+    // Only the person's own rules still apply (no internships, nothing below the minimum experience), plus age/closed/duplicate checks.
+    const alerted = (job.metadata as {sourceName?:string}|undefined)?.sourceName === 'LinkedIn alert email';
+    const belowLevel = alerted ? levelExclusion(job,config) : undefined;
+    const filter = alerted ? (belowLevel ? {matches:false,reason:belowLevel} : {matches:true}) : matchesSearch(job,config);
     let disposition = 'REJECTED_SEARCH', reason = filter.reason ?? '', score: number|null = null;
     let fit: ReturnType<typeof scoreJob> | undefined;
     if (existing?.status === 'CLOSED_JOB' || isClosedJob(input.description)) {
@@ -110,7 +114,7 @@ export function persistJob(db: Database.Database, input: JobInput, config: Confi
       disposition = bucket; reason = bucket==='UNKNOWN'?'Source has no verifiable posting timestamp':`Posting age is ${bucket.toLowerCase()}`;
     } else if (filter.matches) {
       fit = scoreJob(job.description,config,{title:job.title,location:job.location,workMode:job.workMode});
-      score=fit.score; disposition=!fit.mandatoryMissing.length&&score>=config.application.review_min_score?'ELIGIBLE':'LOW_FIT';reason=fit.reason;
+      score=fit.score; disposition=alerted||(!fit.mandatoryMissing.length&&score>=config.application.review_min_score)?'ELIGIBLE':'LOW_FIT';reason=fit.reason;
     }
     const hasApplication = existing ? db.prepare('SELECT id FROM applications WHERE job_id=?').get(existing.id) : undefined;
     const timestamp = new Date(now).toISOString();

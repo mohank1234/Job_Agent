@@ -50,11 +50,12 @@ if ($env:JOBAGENT_MAIL_PASSWORD) {
 } else { Write-Host 'Job-alert emails skipped (JOBAGENT_MAIL_PASSWORD is not set).' }
 
 Write-Host "$(Get-Date -Format s) LinkedIn discovery, scoring and application preparation"
-Invoke-Checked 'run' { npx tsx src/cli.ts run --headless --limit $Limit --source 'LinkedIn configured QA search' }
+# No broad LinkedIn search any more: only the jobs LinkedIn sends you (alert emails, imported above) are processed. This queues them, fills forms up to Submit and drafts notes.
+Invoke-Checked 'run' { npx tsx src/cli.ts run --headless --no-discover --limit $Limit }
 
 if (-not $SkipContacts) {
   Write-Host "$(Get-Date -Format s) hiring-contact search"
-  npx tsx src/cli.ts find-contacts --headless --companies 10
+  npx tsx src/cli.ts find-contacts --headless --companies 5
   if ($LASTEXITCODE -ne 0) { Write-Warning "find-contacts exited with code $LASTEXITCODE; continuing so the state is still published." }
 }
 

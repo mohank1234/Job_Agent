@@ -101,7 +101,7 @@ export function draftOutreach(db: Database.Database, config: Config, jobId: numb
 export type OutreachResult = { contactsDiscovered: number; prepared: number; completed: number; duplicates: number; sourcesAttempted: number; sourcesWorking: number; errors: string[] };
 export async function prepareOutreachForJobs(root: string, db: Database.Database, config: Config, runId: string, jobIds: number[]): Promise<OutreachResult> {
   const jobs = jobIds.map((id) => db.prepare('SELECT id, company, title, description, fit_score, metadata FROM jobs WHERE id=?').get(id) as { id: number; company: string; title: string; description: string; fit_score: number; metadata: string | null } | undefined)
-    .filter((job): job is NonNullable<typeof job> => !!job && job.fit_score >= config.application.review_min_score);
+    .filter((job): job is NonNullable<typeof job> => !!job && (job.fit_score >= config.application.review_min_score || /"sourceName":"LinkedIn alert email"/.test(job.metadata ?? '')));
   // Invitations already sent (or declined) must never be drafted again, even if the database was restored from an older copy.
   applyLedger(db, await readLedger(root));
   const discovery = await discoverContacts(root, [...new Set(jobs.map((job) => job.company))]);
