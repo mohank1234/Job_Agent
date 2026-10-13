@@ -1,3 +1,4 @@
+import { runInbox } from './inbox.js';
 import { freshAlerts, loadAlertJobs, readAlertFile } from './alert-import.js';
 import { auditForPublication } from './audit-public.js';
 import { writeOutreachWorkbook } from './excel-export.js';
@@ -202,6 +203,7 @@ program.command('import-alerts <file>').description('Add the LinkedIn jobs from 
   }catch(error){await run?.finish('FAILED',{error:error instanceof Error?error.message:String(error)}).catch(()=>undefined);throw error;}
   finally{if(context)await closeSession(context).catch(()=>undefined);db.close();await release();}
 });
+program.command('inbox').description('Everything waiting on you, one item at a time and without job numbers: submit ready applications, finish manual ones, answer questions').option('--only <part>','ready, manual or questions').action(async(options:{only?:string})=>{const config=await loadConfig(root);const db=openDatabase(root);try{await runInbox(root,db,config,options.only);}finally{db.close();}});
 program.command('draft-outreach').description('Re-write the connection notes that have not been sent yet, for the contacts already found (does not open LinkedIn)').action(async()=>{
   const config=await loadConfig(root);const release=await acquireRunLock(root);const db=openDatabase(root);
   try{
